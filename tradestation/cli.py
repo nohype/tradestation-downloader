@@ -8,7 +8,7 @@ import sys
 
 from .config import ConfigurationError, load_config
 from .downloader import TradeStationDownloader
-from .models import DEFAULT_SYMBOLS, Compression, StorageFormat
+from .models import DEFAULT_SYMBOLS, Compression, StorageFormat, validate_symbol
 
 # Configure logging
 logging.basicConfig(
@@ -92,6 +92,16 @@ Examples:
         help="Enable verbose (debug) logging",
     )
     parser.add_argument(
+        "--metadata",
+        action="store_true",
+        help="Fetch symbol metadata from TradeStation API and derive session times from downloaded data, then exit",
+    )
+    parser.add_argument(
+        "--export-csv",
+        action="store_true",
+        help="Export downloaded data to CSV (.txt) files in a 'plain_data' sibling directory, then exit",
+    )
+    parser.add_argument(
         "-w", "--workers",
         type=int,
         default=4,
@@ -138,6 +148,14 @@ def run_download(args: argparse.Namespace) -> int:
         print_categories()
         return 0
 
+    if args.metadata:
+        from .metadata import run_metadata
+        return run_metadata(args.config)
+
+    if args.export_csv:
+        from .csv_export import run_export_csv
+        return run_export_csv(args.config, args.symbols)
+
     # Load configuration
     try:
         config = load_config(args.config)
@@ -150,6 +168,10 @@ def run_download(args: argparse.Namespace) -> int:
         config.symbols = args.symbols
     elif args.category:
         config.symbols = DEFAULT_SYMBOLS[args.category]
+
+    # Validate symbols
+    for symbol in config.symbols:
+        validate_symbol(symbol)
 
     # Override storage format if provided
     if args.storage_format:

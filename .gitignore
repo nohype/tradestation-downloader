@@ -21,6 +21,9 @@ htmlcov/
 
 # Data files
 data/
+minute_data/
+minute_plain_data/
+plain_data/
 *.parquet
 
 # Config with secrets
@@ -41,3 +44,5 @@ Thumbs.db
 # Logs
 *.log
 logs/
+/.audit
+/.pm_research

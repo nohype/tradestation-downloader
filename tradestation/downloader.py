@@ -14,8 +14,8 @@ from typing import Any
 import pandas as pd
 import requests
 
-from .auth import TradeStationAuth
-from .models import DownloadConfig
+from .auth import AuthenticationError, TradeStationAuth
+from .models import DownloadConfig, validate_symbol
 from .storage import create_storage
 
 logger = logging.getLogger(__name__)
@@ -28,8 +28,12 @@ _COLUMN_MAP = {
     "Low": "low",
     "Close": "close",
     "TotalVolume": "volume",
+    "UpVolume": "up_volume",
+    "DownVolume": "down_volume",
+    "UpTicks": "up_ticks",
+    "DownTicks": "down_ticks",
 }
-_OUTPUT_COLUMNS = ["datetime", "open", "high", "low", "close", "volume"]
+_OUTPUT_COLUMNS = ["datetime", "open", "high", "low", "close", "volume", "up_volume", "down_volume", "up_ticks", "down_ticks"]
 
 
 @dataclass
@@ -91,6 +95,8 @@ class TradeStationDownloader:
     ) -> DownloadStats:
         """Download data for all configured symbols (parallel or sequential)."""
         symbols = symbols or self.config.symbols
+        for symbol in symbols:
+            validate_symbol(symbol)
         if not symbols:
             logger.error("No symbols configured")
             return self._stats
@@ -153,10 +159,8 @@ class TradeStationDownloader:
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(download_one, sym): sym for sym in symbols}
-            completed = 0
 
-            for future in as_completed(futures):
-                completed += 1
+            for completed, future in enumerate(as_completed(futures), start=1):
                 symbol = future.result()
                 logger.info("[%d/%d] Completed %s", completed, total, symbol)
 
@@ -180,6 +184,7 @@ class TradeStationDownloader:
 
     def download_symbol(self, symbol: str, incremental: bool = True) -> None:
         """Download data for a single symbol."""
+        validate_symbol(symbol)
         start_date, has_existing = self._get_download_start(symbol, incremental)
 
         logger.info("  [%s] Downloading from %s...", symbol, start_date.strftime("%Y-%m-%d %H:%M:%S"))
@@ -264,15 +269,23 @@ class TradeStationDownloader:
             resp = requests.get(url, headers=headers, params=params, timeout=60)
 
             if resp.status_code == 429:
+                if retry >= self.config.max_retries:
+                    logger.error("Rate limited after %d retries", self.config.max_retries)
+                    return None
                 wait = int(resp.headers.get("Retry-After", 60))
                 logger.warning("Rate limited, waiting %ds...", wait)
                 time.sleep(wait)
-                return self._api_request(symbol, last_date, barsback, retry)
+                return self._api_request(symbol, last_date, barsback, retry + 1)
 
             if resp.status_code == 401:
+                if retry >= self.config.max_retries or retry > 0:
+                    raise AuthenticationError(
+                        f"Authentication failed for {symbol}: "
+                        f"access token rejected by TradeStation API"
+                    )
                 logger.info("Token expired, refreshing...")
                 self._auth.invalidate()
-                return self._api_request(symbol, last_date, barsback, retry)
+                return self._api_request(symbol, last_date, barsback, retry + 1)
 
             resp.raise_for_status()
             return resp.json()
@@ -301,7 +314,7 @@ class TradeStationDownloader:
         df = df[[c for c in _OUTPUT_COLUMNS if c in df.columns]]
 
         # Convert OHLCV to numeric types
-        for col in ["open", "high", "low", "close", "volume"]:
+        for col in ["open", "high", "low", "close", "volume", "up_volume", "down_volume", "up_ticks", "down_ticks"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 

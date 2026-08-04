@@ -70,6 +70,18 @@ class DownloadConfig:
             self.compression = Compression.from_string(self.compression)
 
 
+def validate_symbol(symbol: str) -> None:
+    """Validate that a symbol does not contain path or URL injection characters."""
+    if not isinstance(symbol, str):
+        raise ValueError(f"Invalid symbol: {symbol!r}. Symbol must be a string.")
+    if ".." in symbol:
+        raise ValueError(f"Invalid symbol: {symbol!r}. Symbol must not contain '..'.")
+    if any(ord(c) < 32 or c in "/\\?# %" for c in symbol):
+        raise ValueError(
+            f"Invalid symbol: {symbol!r}. Symbol contains control or URL/path injection characters."
+        )
+
+
 # Default US Futures symbols organized by category
 DEFAULT_SYMBOLS = {
     "index": [

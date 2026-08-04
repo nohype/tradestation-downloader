@@ -13,6 +13,7 @@ This script will:
 4. Save it to config.yaml
 """
 
+import secrets
 import sys
 import threading
 import webbrowser
@@ -36,6 +37,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
     """Handle OAuth callback."""
 
     auth_code = None
+    state = None
 
     def do_GET(self):
         """Handle GET request from OAuth callback."""
@@ -43,6 +45,15 @@ class CallbackHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/":
             query_params = parse_qs(parsed.query)
+            state = query_params.get("state", [None])[0]
+
+            if state != CallbackHandler.state:
+                self.send_response(400)
+                self.send_header("Content-type", "text/html")
+                self.end_headers()
+                error = "Invalid state parameter"
+                self.wfile.write(f"<html><body>Error: {error}</body></html>".encode())
+                return
 
             if "code" in query_params:
                 CallbackHandler.auth_code = query_params["code"][0]
@@ -75,6 +86,9 @@ class CallbackHandler(BaseHTTPRequestHandler):
 def get_authorization_code(client_id: str) -> str:
     """Open browser for user authorization and capture the code."""
 
+    state = secrets.token_urlsafe(32)
+    CallbackHandler.state = state
+
     # Build authorization URL
     params = {
         "response_type": "code",
@@ -82,6 +96,7 @@ def get_authorization_code(client_id: str) -> str:
         "redirect_uri": REDIRECT_URI,
         "audience": "https://api.tradestation.com",
         "scope": "openid profile MarketData ReadAccount offline_access",
+        "state": state,
     }
     auth_url = f"{AUTHORIZE_URL}?{urlencode(params)}"
 
@@ -125,7 +140,7 @@ def exchange_code_for_tokens(client_id: str, client_secret: str, auth_code: str)
         "redirect_uri": REDIRECT_URI,
     }
 
-    response = requests.post(TOKEN_URL, data=payload)
+    response = requests.post(TOKEN_URL, data=payload, timeout=30)
 
     if response.status_code != 200:
         print(f"Error: {response.status_code}")

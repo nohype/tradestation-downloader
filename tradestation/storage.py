@@ -82,6 +82,20 @@ class StorageBackend(ABC):
             return df["datetime"].max().to_pydatetime()
         return None
 
+    def get_first_timestamp(self, symbol: str) -> datetime | None:
+        """Get the first timestamp for a symbol without loading all data.
+
+        Default implementation loads all data. Subclasses can override for efficiency.
+        """
+        df = self.load(symbol)
+        if df is None or df.empty:
+            return None
+        if isinstance(df.index, pd.DatetimeIndex):
+            return df.index.min().to_pydatetime()
+        if "datetime" in df.columns:
+            return df["datetime"].min().to_pydatetime()
+        return None
+
     def append(self, symbol: str, new_df: pd.DataFrame) -> None:
         """Append new data to existing data.
 
@@ -204,6 +218,23 @@ class DailyPartitionedStorage(StorageBackend):
             logger.warning("Failed to get last timestamp for %s: %s", symbol, e)
             return None
 
+    def get_first_timestamp(self, symbol: str) -> datetime | None:
+        """Get first timestamp by reading only the earliest partition."""
+        files = self._get_partition_files(symbol)
+        if not files:
+            return None
+        try:
+            # Files are sorted, so first file is the earliest partition
+            df = pd.read_parquet(files[0])
+            if isinstance(df.index, pd.DatetimeIndex):
+                return df.index.min().to_pydatetime()
+            if "datetime" in df.columns:
+                return pd.to_datetime(df["datetime"]).min().to_pydatetime()
+            return None
+        except Exception as e:
+            logger.warning("Failed to get first timestamp for %s: %s", symbol, e)
+            return None
+
     def append(self, symbol: str, new_df: pd.DataFrame) -> None:
         """Append new data by only updating affected partitions."""
         new_df = _prepare_dataframe(new_df, datetime_index=False)
@@ -297,6 +328,23 @@ class MonthlyPartitionedStorage(StorageBackend):
             return None
         except Exception as e:
             logger.warning("Failed to get last timestamp for %s: %s", symbol, e)
+            return None
+
+    def get_first_timestamp(self, symbol: str) -> datetime | None:
+        """Get first timestamp by reading only the earliest partition."""
+        files = self._get_partition_files(symbol)
+        if not files:
+            return None
+        try:
+            # Files are sorted, so first file is the earliest partition
+            df = pd.read_parquet(files[0])
+            if isinstance(df.index, pd.DatetimeIndex):
+                return df.index.min().to_pydatetime()
+            if "datetime" in df.columns:
+                return pd.to_datetime(df["datetime"]).min().to_pydatetime()
+            return None
+        except Exception as e:
+            logger.warning("Failed to get first timestamp for %s: %s", symbol, e)
             return None
 
     def append(self, symbol: str, new_df: pd.DataFrame) -> None:
