@@ -4,7 +4,7 @@ import json
 import logging
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -32,13 +32,17 @@ _WEEKDAY_NAMES = [
 EXCHANGE_TIMEZONES = {
     "CME": "America/Chicago",
     "CBOT": "America/Chicago",
-    "COMEX": "America/Chicago",
-    "NYMEX": "America/Chicago",
+    "COMEX": "America/New_York",
+    "NYMEX": "America/New_York",
+    "CBOEF": "America/Chicago",
     "NYSE": "America/New_York",
     "NASDAQ": "America/New_York",
     "AMEX": "America/New_York",
     "ARCX": "America/New_York",
     "ICE": "America/New_York",
+    "ICEUS": "America/New_York",
+    "IFEU": "Europe/London",
+    "ICE FUTURES EUROPE": "Europe/London",
     "EUREX": "Europe/Berlin",
     "EUREX_US": "America/Chicago",
 }
@@ -57,9 +61,7 @@ def convert_df_timezone(df: pd.DataFrame, to_tz: str) -> pd.DataFrame:
         return df
     result = df.copy()
     if isinstance(result.index, pd.DatetimeIndex):
-        result.index = (
-            result.index.tz_localize("UTC").tz_convert(ZoneInfo(to_tz)).tz_localize(None)
-        )
+        result.index = result.index.tz_localize("UTC").tz_convert(ZoneInfo(to_tz)).tz_localize(None)
     elif "datetime" in result.columns:
         result["datetime"] = (
             pd.to_datetime(result["datetime"])
@@ -68,6 +70,37 @@ def convert_df_timezone(df: pd.DataFrame, to_tz: str) -> pd.DataFrame:
             .dt.tz_localize(None)
         )
     return result
+
+
+def select_standard_time_bars(df: pd.DataFrame, tz: str | None) -> pd.DataFrame:
+    """Return the subset of ``df`` whose bars fall in the exchange's standard (winter) time.
+
+    Used so session derivation does not collapse DST-shifted maintenance gaps via a
+    cross-season minute-of-day union. If winter bars exist they are returned; otherwise
+    the DST (summer) bars are returned (still a single, gap-stable season); if ``tz`` is
+    None or the frame is empty/unclassifiable, ``df`` is returned unchanged.
+    """
+    if tz is None or df.empty:
+        return df
+
+    if isinstance(df.index, pd.DatetimeIndex):
+        idx = df.index
+    elif "datetime" in df.columns:
+        idx = pd.DatetimeIndex(pd.to_datetime(df["datetime"]))
+    else:
+        return df
+
+    local_aware = idx.tz_localize("UTC").tz_convert(ZoneInfo(tz))
+    # ponytail: this pandas build lacks Series.dt.dst(), so we use Timestamp.dst() per bar.
+    # Upgrade path: revert to vectorized `local_aware.to_series().dt.dst()` when available.
+    dst = local_aware.map(lambda t: t.dst())
+    winter_mask = dst == pd.Timedelta(0)
+
+    if winter_mask.any():
+        return df[winter_mask]
+    if (~winter_mask).any():
+        return df[~winter_mask]
+    return df
 
 
 def fetch_symbol_details(auth: TradeStationAuth, symbols: list[str]) -> list[dict]:
@@ -100,6 +133,18 @@ def fetch_symbol_details(auth: TradeStationAuth, symbols: list[str]) -> list[dic
             logger.error("Invalid JSON in symbol details for %s: %s", symbol_str, e)
             continue
         details.extend(data.get("Symbols", []))
+        for error in data.get("Errors", []):
+            logger.error(
+                "Symbol %s details error: %s - %s",
+                error.get("Symbol"),
+                error.get("Error"),
+                error.get("Message"),
+            )
+        returned_symbols = {s.get("Symbol") for s in data.get("Symbols", [])} | {
+            e.get("Symbol") for e in data.get("Errors", [])
+        }
+        for missing in set(batch) - returned_symbols:
+            logger.error("No symbol details returned for %s", missing)
         if i + 50 < len(symbols):
             time.sleep(0.2)
     return details
@@ -278,23 +323,35 @@ def run_metadata(config_path: str = "config.yaml") -> int:
             df = storage.load(symbol)
             first = storage.get_first_timestamp(symbol)
             last = storage.get_last_timestamp(symbol)
-            if df is not None and not df.empty:
-                session_times_utc = derive_session_times(df)
-                sessions_utc = derive_sessions(df)
-            else:
-                session_times_utc = {}
-                sessions_utc = []
 
             api_data = details_by_symbol.get(symbol)
             exchange = api_data.get("Exchange") if api_data else None
             tz = get_exchange_timezone(exchange)
-            if tz and df is not None and not df.empty:
-                df_local = convert_df_timezone(df, tz)
-                session_times = derive_session_times(df_local)
-                sessions = derive_sessions(df_local)
+
+            if tz is None and exchange is not None and exchange.upper().startswith("ICE"):
+                logger.error(
+                    "Symbol %s exchange '%s' is not in EXCHANGE_TIMEZONES; "
+                    "timezone and local sessions will be null.",
+                    symbol,
+                    exchange,
+                )
+
+            if df is not None and not df.empty:
+                canon_df = select_standard_time_bars(df, tz)
+                session_times_utc = derive_session_times(canon_df)
+                sessions_utc = derive_sessions(canon_df)
+                if tz:
+                    canon_df_local = convert_df_timezone(canon_df, tz)
+                    session_times = derive_session_times(canon_df_local)
+                    sessions = derive_sessions(canon_df_local)
+                else:
+                    session_times = session_times_utc
+                    sessions = sessions_utc
             else:
-                session_times = session_times_utc
-                sessions = sessions_utc
+                sessions_utc = []
+                session_times_utc = {}
+                sessions = []
+                session_times = {}
 
             symbol_metadata[symbol] = {
                 "symbol": symbol,
@@ -313,7 +370,9 @@ def run_metadata(config_path: str = "config.yaml") -> int:
             }
 
         output = {
-            "generated_at": datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "generated_at": datetime.now(UTC)
+            .replace(tzinfo=None)
+            .strftime("%Y-%m-%dT%H:%M:%SZ"),
             "data_dir": str(data_dir),
             "timezone": "UTC",
             "symbols": symbol_metadata,

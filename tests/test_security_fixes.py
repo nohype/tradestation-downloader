@@ -3,7 +3,7 @@
 import contextlib
 import re
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from unittest.mock import Mock, patch
 
@@ -141,7 +141,7 @@ class TestApiRequest401:
         mock_get.side_effect = [self._mock_401(), self._mock_ok()]
         mock_post.return_value = self._mock_token_response()
 
-        result = downloader._api_request("ES", datetime.now(timezone.utc))
+        result = downloader._api_request("ES", datetime.now(UTC))
 
         assert result == {"Bars": []}
         assert mock_get.call_count == 2
@@ -154,7 +154,7 @@ class TestApiRequest401:
         mock_post.return_value = self._mock_token_response()
 
         with pytest.raises(AuthenticationError):
-            downloader._api_request("ES", datetime.now(timezone.utc))
+            downloader._api_request("ES", datetime.now(UTC))
 
         assert mock_get.call_count == 2
         assert mock_post.call_count == 1
@@ -166,7 +166,7 @@ class TestApiRequest401:
         mock_get.return_value = self._mock_401()
 
         with pytest.raises(AuthenticationError):
-            downloader._api_request("ES", datetime.now(timezone.utc))
+            downloader._api_request("ES", datetime.now(UTC))
 
         assert mock_get.call_count == 1
         assert mock_post.call_count == 0
@@ -212,7 +212,7 @@ class TestApiRequest429:
     def test_429_retries_then_succeeds(self, _mock_sleep, mock_get, downloader):
         mock_get.side_effect = [self._mock_429(), self._mock_ok()]
 
-        result = downloader._api_request("ES", datetime.now(timezone.utc))
+        result = downloader._api_request("ES", datetime.now(UTC))
 
         assert result == {"Bars": []}
         assert mock_get.call_count == 2
@@ -222,7 +222,7 @@ class TestApiRequest429:
     def test_429_persistent_stops_after_max_retries(self, _mock_sleep, mock_get, downloader):
         mock_get.return_value = self._mock_429()
 
-        result = downloader._api_request("ES", datetime.now(timezone.utc))
+        result = downloader._api_request("ES", datetime.now(UTC))
 
         assert result is None
         assert mock_get.call_count == downloader.config.max_retries + 1
