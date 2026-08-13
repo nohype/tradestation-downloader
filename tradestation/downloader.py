@@ -32,8 +32,10 @@ _COLUMN_MAP = {
     "DownVolume": "down_volume",
     "UpTicks": "up_ticks",
     "DownTicks": "down_ticks",
+    "OpenInterest": "open_interest",
+    "TotalTicks": "total_ticks",
 }
-_OUTPUT_COLUMNS = ["datetime", "open", "high", "low", "close", "volume", "up_volume", "down_volume", "up_ticks", "down_ticks"]
+_OUTPUT_COLUMNS = ["datetime", "open", "high", "low", "close", "volume", "up_volume", "down_volume", "up_ticks", "down_ticks", "open_interest", "total_ticks"]
 
 
 @dataclass
@@ -314,9 +316,11 @@ class TradeStationDownloader:
         df = df[[c for c in _OUTPUT_COLUMNS if c in df.columns]]
 
         # Convert OHLCV to numeric types
-        for col in ["open", "high", "low", "close", "volume", "up_volume", "down_volume", "up_ticks", "down_ticks"]:
+        for col in ["open", "high", "low", "close", "volume", "up_volume", "down_volume", "up_ticks", "down_ticks", "open_interest", "total_ticks"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
+                if col in ("open_interest", "total_ticks"):
+                    df[col] = df[col].astype("Int64")
 
         df = df.sort_values("datetime").drop_duplicates(subset=["datetime"], keep="last")
         df = df[df["datetime"] >= start_date]

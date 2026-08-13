@@ -102,6 +102,10 @@ def run_export_csv(config_path: str, symbols: list[str] | None = None) -> int:
             rename_map["volume"] = "Vol"
             output_columns.append("Vol")
 
+        for col in ["open_interest", "total_ticks"]:
+            if col in df.columns:
+                output_columns.append(col)
+
         out_df = df.rename(columns=rename_map)[output_columns]
 
         path = output_dir / f"{symbol}.txt"

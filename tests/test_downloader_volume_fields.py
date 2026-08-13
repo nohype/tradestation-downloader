@@ -2,6 +2,7 @@
 
 from datetime import datetime
 
+import pandas as pd
 import pandas.api.types as ptypes
 
 from tradestation.downloader import _OUTPUT_COLUMNS, TradeStationDownloader
@@ -20,8 +21,6 @@ SAMPLE_BARS = [
         "IsRealtime": False,
         "IsEndOfHistory": False,
         "TotalTicks": 162,
-        "UnchangedTicks": 0,
-        "UnchangedVolume": 0,
         "UpTicks": 91,
         "UpVolume": 110,
         "Epoch": 1738756560000,
@@ -40,8 +39,6 @@ SAMPLE_BARS = [
         "IsRealtime": False,
         "IsEndOfHistory": False,
         "TotalTicks": 113,
-        "UnchangedTicks": 0,
-        "UnchangedVolume": 0,
         "UpTicks": 46,
         "UpVolume": 87,
         "Epoch": 1738756620000,
@@ -53,7 +50,8 @@ START_DATE = datetime(2025, 1, 1)
 
 BASE_COLUMNS = ["datetime", "open", "high", "low", "close", "volume"]
 NEW_COLUMNS = ["up_volume", "down_volume", "up_ticks", "down_ticks"]
-EXPECTED_COLUMNS = BASE_COLUMNS + NEW_COLUMNS
+DATA_COLUMNS = ["open_interest", "total_ticks"]
+EXPECTED_COLUMNS = BASE_COLUMNS + NEW_COLUMNS + DATA_COLUMNS
 
 
 class TestBarsToDataFrameVolumeFields:
@@ -128,4 +126,114 @@ class TestBarsToDataFrameVolumeFields:
             assert col in df.columns, f"Missing column: {col}"
             assert ptypes.is_numeric_dtype(df[col]), (
                 f"Column {col} should be numeric, got {df[col].dtype}"
+            )
+
+
+class TestBarsToDataFrameDataFields:
+    """Tests for the additional data fields in _bars_to_dataframe."""
+
+    def test_data_fields_present_and_ordered(self):
+        """The 2 data fields are present and appended after down_ticks."""
+        df = TradeStationDownloader._bars_to_dataframe(SAMPLE_BARS, START_DATE)
+        assert list(df.columns) == EXPECTED_COLUMNS, (
+            f"Expected columns {EXPECTED_COLUMNS}, got {list(df.columns)}"
+        )
+        assert list(df.columns)[-2:] == DATA_COLUMNS
+
+    def test_data_field_values_correct(self):
+        """The 2 new fields contain the exact sample values from the API response."""
+        df = TradeStationDownloader._bars_to_dataframe(SAMPLE_BARS, START_DATE)
+        for col in DATA_COLUMNS:
+            assert col in df.columns, f"Missing column: {col}"
+        assert df["open_interest"].iloc[0] == 0
+        assert df["total_ticks"].iloc[0] == 162
+        assert df["open_interest"].iloc[1] == 0
+        assert df["total_ticks"].iloc[1] == 113
+
+    def test_data_fields_numeric_type(self):
+        """The new data fields are returned as numeric types, not strings."""
+        df = TradeStationDownloader._bars_to_dataframe(SAMPLE_BARS, START_DATE)
+        for col in DATA_COLUMNS:
+            assert col in df.columns, f"Missing column: {col}"
+            assert ptypes.is_numeric_dtype(df[col]), (
+                f"Column {col} should be numeric, got {df[col].dtype}"
+            )
+
+    def test_open_interest_nullable(self):
+        """OpenInterest may be None or missing from the API and is handled as NA."""
+        bars = [
+            {
+                "High": "6370",
+                "Low": "6368.75",
+                "Open": "6369.75",
+                "Close": "6370",
+                "TimeStamp": "2025-02-05T11:58:00Z",
+                "TotalVolume": "150",
+                "DownTicks": 50,
+                "DownVolume": 70,
+                "OpenInterest": None,
+                "TotalTicks": 100,
+                "UpTicks": 50,
+                "UpVolume": 80,
+                "Epoch": 1738756680000,
+                "BarStatus": "Closed",
+            },
+            {
+                "High": "6370",
+                "Low": "6369.25",
+                "Open": "6369.75",
+                "Close": "6370",
+                "TimeStamp": "2025-02-05T11:59:00Z",
+                "TotalVolume": "120",
+                "DownTicks": 40,
+                "DownVolume": 50,
+                "TotalTicks": 80,
+                "UpTicks": 40,
+                "UpVolume": 70,
+                "Epoch": 1738756740000,
+                "BarStatus": "Closed",
+            },
+        ]
+        df = TradeStationDownloader._bars_to_dataframe(bars, START_DATE)
+        for col in DATA_COLUMNS:
+            assert col in df.columns, f"Missing column: {col}"
+        assert pd.isna(df["open_interest"].iloc[0])
+        assert pd.isna(df["open_interest"].iloc[1])
+        assert ptypes.is_numeric_dtype(df["open_interest"])
+
+    def test_data_fields_in_output_columns(self):
+        """The new fields must be declared in _OUTPUT_COLUMNS."""
+        for col in DATA_COLUMNS:
+            assert col in _OUTPUT_COLUMNS, (
+                f"Expected {col} to be declared in _OUTPUT_COLUMNS"
+            )
+
+    def test_data_fields_appended_after_down_ticks(self):
+        """The new columns appear at the end of the output column list."""
+        assert EXPECTED_COLUMNS.index("down_ticks") == 9
+        assert EXPECTED_COLUMNS[10:] == DATA_COLUMNS
+
+    def test_data_fields_missing_do_not_crash(self):
+        """Missing data fields do not crash and do not create extra columns."""
+        bars = [
+            {
+                "High": "6370",
+                "Low": "6368.75",
+                "Open": "6369.75",
+                "Close": "6370",
+                "TimeStamp": "2025-02-05T11:56:00Z",
+                "TotalVolume": "213",
+                "UpTicks": 91,
+                "UpVolume": 110,
+                "DownTicks": 71,
+                "DownVolume": 103,
+            }
+        ]
+        df = TradeStationDownloader._bars_to_dataframe(bars, START_DATE)
+        for col in DATA_COLUMNS:
+            assert col not in df.columns, (
+                f"Unexpected column {col} when data fields are missing"
+            )
+            assert col in _OUTPUT_COLUMNS, (
+                f"Expected {col} to be declared in _OUTPUT_COLUMNS"
             )

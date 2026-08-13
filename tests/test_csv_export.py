@@ -31,6 +31,22 @@ def _create_sample_df():
     })
 
 
+def _create_sample_df_with_data_fields():
+    """Create a sample DataFrame with the 2 additional data fields."""
+    df = _create_sample_df().copy()
+    df["open_interest"] = [10, 20, 30]
+    df["total_ticks"] = [1000, 1100, 1200]
+    return df
+
+
+def _create_sample_df_with_data_fields_na():
+    """Create a sample DataFrame with nullable Int64 NA values in data fields."""
+    df = _create_sample_df().copy()
+    df["open_interest"] = pd.array([10, pd.NA, 30], dtype="Int64")
+    df["total_ticks"] = pd.array([1000, 1100, 1200], dtype="Int64")
+    return df
+
+
 @pytest.fixture(autouse=True)
 def _clean_plain_data(temp_data_dir):
     """Remove the shared plain_data sibling directory before and after tests."""
@@ -283,3 +299,120 @@ class TestExportCsv:
         )
         assert result == 0
         self._assert_csv_output(temp_data_dir, "@ES", df)
+
+    def test_csv_with_data_fields(self, temp_data_dir):
+        """CSV appends the 2 new data field columns in the Vol path."""
+        df = _create_sample_df_with_data_fields()
+        self._save_symbol(temp_data_dir, "@ES", df)
+
+        config = self._make_config(temp_data_dir)
+        result = self._call_export(
+            str(temp_data_dir / "config.yaml"),
+            ["@ES"],
+            config,
+        )
+        assert result == 0
+
+        plain_data = temp_data_dir.parent / "plain_data"
+        output = plain_data / "@ES.txt"
+        assert output.exists()
+
+        text = output.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        expected_header = (
+            '"Date","Time","Open","High","Low","Close","Vol",'
+            '"open_interest","total_ticks"'
+        )
+        assert lines[0] == expected_header
+        assert len(lines) == len(df) + 1
+
+        for i, row in enumerate(df.itertuples(index=False), start=1):
+            parts = lines[i].split(",")
+            assert len(parts) == 9
+            assert '"' not in lines[i]
+
+            ts = pd.to_datetime(row.datetime)
+            assert parts[0] == ts.strftime("%m/%d/%Y")
+            assert parts[1] == ts.strftime("%H:%M")
+            assert float(parts[2]) == row.open
+            assert float(parts[3]) == row.high
+            assert float(parts[4]) == row.low
+            assert float(parts[5]) == row.close
+            assert int(parts[6]) == int(row.volume)
+            assert int(parts[7]) == row.open_interest
+            assert int(parts[8]) == row.total_ticks
+
+    def test_csv_with_data_fields_na(self, temp_data_dir):
+        """Nullable Int64 NA values in the data fields are written as empty fields."""
+        df = _create_sample_df_with_data_fields_na()
+        self._save_symbol(temp_data_dir, "@ES", df)
+
+        config = self._make_config(temp_data_dir)
+        result = self._call_export(
+            str(temp_data_dir / "config.yaml"),
+            ["@ES"],
+            config,
+        )
+        assert result == 0
+
+        plain_data = temp_data_dir.parent / "plain_data"
+        output = plain_data / "@ES.txt"
+        assert output.exists()
+
+        text = output.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        expected_header = (
+            '"Date","Time","Open","High","Low","Close","Vol",'
+            '"open_interest","total_ticks"'
+        )
+        assert lines[0] == expected_header
+        assert len(lines) == len(df) + 1
+
+        for i, row in enumerate(df.itertuples(index=False), start=1):
+            parts = lines[i].split(",")
+            assert len(parts) == 9
+            assert '"' not in lines[i]
+
+            ts = pd.to_datetime(row.datetime)
+            assert parts[0] == ts.strftime("%m/%d/%Y")
+            assert parts[1] == ts.strftime("%H:%M")
+            assert float(parts[2]) == row.open
+            assert float(parts[3]) == row.high
+            assert float(parts[4]) == row.low
+            assert float(parts[5]) == row.close
+            assert int(parts[6]) == int(row.volume)
+            if pd.isna(row.open_interest):
+                assert parts[7] == ""
+            else:
+                assert int(parts[7]) == int(row.open_interest)
+            assert int(parts[8]) == int(row.total_ticks)
+
+    @pytest.mark.parametrize(
+        "storage_cls",
+        [SingleFileStorage, DailyPartitionedStorage, MonthlyPartitionedStorage],
+    )
+    def test_csv_data_fields_all_storage_backends(self, storage_cls, temp_data_dir):
+        """The 2 new data field columns are exported from every storage backend."""
+        df = _create_sample_df_with_data_fields()
+        self._save_symbol(temp_data_dir, "@ES", df, storage_cls)
+
+        config = self._make_config(temp_data_dir)
+        result = self._call_export(
+            str(temp_data_dir / "config.yaml"),
+            ["@ES"],
+            config,
+        )
+        assert result == 0
+
+        plain_data = temp_data_dir.parent / "plain_data"
+        output = plain_data / "@ES.txt"
+        text = output.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        expected_header = (
+            '"Date","Time","Open","High","Low","Close","Vol",'
+            '"open_interest","total_ticks"'
+        )
+        assert lines[0] == expected_header
+        assert len(lines) == len(df) + 1
+        for line in lines[1:]:
+            assert len(line.split(",")) == 9
