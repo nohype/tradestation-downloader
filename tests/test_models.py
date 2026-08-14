@@ -3,11 +3,12 @@
 import pytest
 
 from tradestation.models import (
+    DEFAULT_SYMBOLS,
     DownloadConfig,
     StorageFormat,
     get_all_symbols,
+    get_symbols_by_categories,
     get_symbols_by_category,
-    DEFAULT_SYMBOLS,
 )
 
 
@@ -52,6 +53,22 @@ class TestDownloadConfig:
         )
         assert config.storage_format == StorageFormat.MONTHLY
 
+    def test_categories(self):
+        config_without = DownloadConfig(
+            client_id="id",
+            client_secret="secret",
+            refresh_token="token",
+        )
+        assert config_without.categories == []
+
+        config_with = DownloadConfig(
+            client_id="id",
+            client_secret="secret",
+            refresh_token="token",
+            categories=["index", "energy"],
+        )
+        assert config_with.categories == ["index", "energy"]
+
 
 class TestSymbols:
     """Tests for symbol utilities."""
@@ -70,6 +87,29 @@ class TestSymbols:
     def test_get_symbols_by_category_invalid(self):
         with pytest.raises(ValueError, match="Unknown category"):
             get_symbols_by_category("invalid_category")
+
+    def test_get_symbols_by_categories(self):
+        symbols = get_symbols_by_categories(["index", "energy"])
+        expected = DEFAULT_SYMBOLS["index"] + DEFAULT_SYMBOLS["energy"]
+        assert symbols == expected
+        assert len(symbols) == len(set(symbols))
+
+    def test_get_symbols_by_categories_empty(self):
+        assert get_symbols_by_categories([]) == []
+
+    def test_get_symbols_by_categories_invalid(self):
+        with pytest.raises(ValueError, match="Unknown category"):
+            get_symbols_by_categories(["index", "invalid_category"])
+
+    def test_get_symbols_by_categories_duplicate_categories(self):
+        symbols = get_symbols_by_categories(["index", "index"])
+        assert symbols == DEFAULT_SYMBOLS["index"]
+
+    def test_get_symbols_by_categories_overlapping_symbols(self):
+        symbols = get_symbols_by_categories(["index", "index", "energy", "index"])
+        expected = DEFAULT_SYMBOLS["index"] + DEFAULT_SYMBOLS["energy"]
+        assert symbols == expected
+        assert len(symbols) == len(set(symbols))
 
     def test_default_symbols_categories(self):
         expected_categories = [

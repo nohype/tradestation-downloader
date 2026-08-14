@@ -6,7 +6,7 @@ from pathlib import Path
 
 import yaml
 
-from .models import Compression, DownloadConfig, StorageFormat, get_all_symbols
+from .models import DEFAULT_SYMBOLS, Compression, DownloadConfig, StorageFormat
 
 
 class ConfigurationError(Exception):
@@ -36,7 +36,7 @@ def load_config(config_path: str = "config.yaml") -> DownloadConfig:
         )
 
     try:
-        with open(config_file, "r", encoding="utf-8") as f:
+        with open(config_file, encoding="utf-8") as f:
             data = yaml.safe_load(f)
     except yaml.YAMLError as e:
         raise ConfigurationError(f"Invalid YAML in {config_path}: {e}") from e
@@ -56,10 +56,21 @@ def _parse_config(data: dict) -> DownloadConfig:
     if missing:
         raise ConfigurationError(f"Missing required fields in tradestation config: {missing}")
 
-    # Get symbols
-    symbols = data.get("symbols", get_all_symbols())
-    if not symbols:
-        symbols = get_all_symbols()
+    # Get symbols and categories
+    symbols = data.get("symbols") or []
+    categories = data.get("categories") or []
+
+    # Validate types
+    if not isinstance(symbols, list):
+        raise ConfigurationError(f"symbols must be a list, got {type(symbols).__name__}")
+    if not isinstance(categories, list):
+        raise ConfigurationError(f"categories must be a list, got {type(categories).__name__}")
+
+    # Validate category names
+    for category in categories:
+        if category not in DEFAULT_SYMBOLS:
+            valid = ", ".join(DEFAULT_SYMBOLS.keys())
+            raise ConfigurationError(f"Unknown category: '{category}'. Valid categories: {valid}")
 
     # Parse storage format
     storage_format_str = data.get("storage_format", "single")
@@ -82,6 +93,7 @@ def _parse_config(data: dict) -> DownloadConfig:
         data_dir=data.get("data_dir", "./data"),
         start_date=data.get("start_date", "2007-01-01"),
         symbols=symbols,
+        categories=categories,
         interval=data.get("interval", 1),
         unit=data.get("unit", "Minute"),
         max_bars_per_request=data.get("max_bars_per_request", 57600),
@@ -94,7 +106,8 @@ def _parse_config(data: dict) -> DownloadConfig:
 
 def create_template_config(output_path: str = "config.yaml.template") -> None:
     """Create a template configuration file."""
-    template = """# TradeStation Historical Data Downloader Configuration
+    categories = ", ".join(DEFAULT_SYMBOLS.keys())
+    template = f"""# TradeStation Historical Data Downloader Configuration
 # =====================================================
 # Copy this file to config.yaml and fill in your credentials
 
@@ -130,12 +143,19 @@ rate_limit_delay: 0.2        # Seconds between API requests
 max_retries: 3               # Retries on failed requests
 
 # Symbols to Download
-# Comment out this section to use all default US futures
-# Or specify exactly which symbols you want:
+# Specify exactly which symbols you want:
 # symbols:
 #   - "@ES"     # E-Mini S&P 500
 #   - "@NQ"     # E-Mini Nasdaq 100
 #   - "@CL"     # Crude Oil
+
+# Categories to Download
+# Instead of or in addition to symbols, specify categories.
+# Available categories: {categories}
+# categories:
+#   - "index"
+#   - "energy"
+#   - "metals"
 """
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(template)

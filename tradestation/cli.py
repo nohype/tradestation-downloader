@@ -8,7 +8,13 @@ import sys
 
 from .config import ConfigurationError, load_config
 from .downloader import TradeStationDownloader
-from .models import DEFAULT_SYMBOLS, Compression, StorageFormat, validate_symbol
+from .models import (
+    DEFAULT_SYMBOLS,
+    Compression,
+    StorageFormat,
+    get_symbols_by_categories,
+    validate_symbol,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -33,6 +39,7 @@ Examples:
   %(prog)s --storage-format daily   Use daily partitioned storage
   %(prog)s --list-symbols           List all default symbols
   %(prog)s --list-categories        List symbol categories
+  %(prog)s --all-categories         Download symbols from all configured categories
 """,
     )
 
@@ -85,6 +92,11 @@ Examples:
         choices=list(DEFAULT_SYMBOLS.keys()),
         metavar="CAT",
         help="Download only symbols from this category",
+    )
+    parser.add_argument(
+        "--all-categories",
+        action="store_true",
+        help="Download symbols from all categories configured in the config file",
     )
     parser.add_argument(
         "-v", "--verbose",
@@ -163,11 +175,20 @@ def run_download(args: argparse.Namespace) -> int:
         logger.error(str(e))
         return 1
 
-    # Override symbols if provided
+    # Resolve symbols
     if args.symbols:
         config.symbols = args.symbols
     elif args.category:
         config.symbols = DEFAULT_SYMBOLS[args.category]
+    elif args.all_categories:
+        if not config.categories:
+            logger.error("--all-categories was set but no categories are configured")
+            return 1
+        config.symbols = get_symbols_by_categories(config.categories)
+    else:
+        if not config.symbols:
+            logger.error("No symbols are configured")
+            return 1
 
     # Validate symbols
     for symbol in config.symbols:

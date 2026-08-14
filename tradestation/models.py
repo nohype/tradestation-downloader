@@ -18,9 +18,9 @@ class StorageFormat(Enum):
         """Create StorageFormat from string value."""
         try:
             return cls(value.lower())
-        except ValueError:
+        except ValueError as err:
             valid = ", ".join(f"'{f.value}'" for f in cls)
-            raise ValueError(f"Invalid storage format: '{value}'. Must be one of: {valid}")
+            raise ValueError(f"Invalid storage format: '{value}'. Must be one of: {valid}") from err
 
 
 class Compression(Enum):
@@ -37,9 +37,9 @@ class Compression(Enum):
         """Create Compression from string value."""
         try:
             return cls(value.lower())
-        except ValueError:
+        except ValueError as err:
             valid = ", ".join(f"'{c.value}'" for c in cls)
-            raise ValueError(f"Invalid compression: '{value}'. Must be one of: {valid}")
+            raise ValueError(f"Invalid compression: '{value}'. Must be one of: {valid}") from err
 
 
 @dataclass
@@ -52,6 +52,7 @@ class DownloadConfig:
     data_dir: str = "./data"
     start_date: str = "2007-01-01"
     symbols: list[str] = field(default_factory=list)
+    categories: list[str] = field(default_factory=list)
     interval: int = 1
     unit: str = "Minute"
     max_bars_per_request: int = 57600  # ~40 days of 1-min bars
@@ -183,3 +184,19 @@ def get_symbols_by_category(category: str) -> list[str]:
         valid = ", ".join(DEFAULT_SYMBOLS.keys())
         raise ValueError(f"Unknown category: '{category}'. Valid categories: {valid}")
     return DEFAULT_SYMBOLS[category]
+
+
+def get_symbols_by_categories(categories: list[str]) -> list[str]:
+    """Get combined list of symbols for multiple categories, removing duplicates while preserving first-seen order."""
+    symbols = []
+    seen = set()
+    for category in categories:
+        if category not in DEFAULT_SYMBOLS:
+            valid = ", ".join(DEFAULT_SYMBOLS.keys())
+            raise ValueError(f"Unknown category: '{category}'. Valid categories: {valid}")
+        for symbol in DEFAULT_SYMBOLS[category]:
+            validate_symbol(symbol)
+            if symbol not in seen:
+                seen.add(symbol)
+                symbols.append(symbol)
+    return symbols

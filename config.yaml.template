@@ -113,3 +113,10 @@ symbols:
   - "@ETH"    # CME Ether Futures
   - "@MBT"    # CME Micro Bitcoin Futures
   - "@MET"    # CME Micro Ether Futures
+
+# Optional: download by symbol category instead of, or in addition to, the `symbols:` list above.
+# The `categories:` list is used when the CLI `--all-categories` flag is set.
+# Available categories can be listed with: tradestation-download --list-categories
+# categories:
+#   - "index"   # Index futures (e.g. @ES, @NQ, @YM)
+#   - "energy"  # Energy futures (e.g. @CL, @NG, @RB)
