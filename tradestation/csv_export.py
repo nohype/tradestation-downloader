@@ -102,9 +102,13 @@ def run_export_csv(config_path: str, symbols: list[str] | None = None) -> int:
             rename_map["volume"] = "Vol"
             output_columns.append("Vol")
 
-        for col in ["open_interest", "total_ticks"]:
-            if col in df.columns:
-                output_columns.append(col)
+        if "open_interest" in df.columns:
+            rename_map["open_interest"] = "OpenInterest"
+            output_columns.append("OpenInterest")
+
+        if "total_ticks" in df.columns:
+            rename_map["total_ticks"] = "TotalTicks"
+            output_columns.append("TotalTicks")
 
         out_df = df.rename(columns=rename_map)[output_columns]
 
