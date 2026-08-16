@@ -250,15 +250,27 @@ class TradeStationDownloader:
             if checkpoints:
                 if all(self._has_bars_at(api_symbol, cp) for cp in checkpoints):
                     chosen = api_symbol
-                elif all(self._has_bars_at(symbol, cp) for cp in checkpoints):
+                elif self.config.use_continuous_default_fallback and all(
+                    self._has_bars_at(symbol, cp) for cp in checkpoints
+                ):
                     logger.warning(
-                        "  [%s] %s has no data covering %s; using %s for full history",
+                        "  [%s] %s has no data covering %s; using %s (default continuous) "
+                        "for the longer history (note: the default continuous contract may "
+                        "contain gaps in TradeStation's data)",
                         symbol, api_symbol, anchor.date(), symbol)
                     chosen = symbol
-                else:
+                elif self.config.use_continuous_default_fallback:
                     logger.warning(
                         "  [%s] Neither %s nor %s covers %s; using %s",
                         symbol, api_symbol, symbol, anchor.date(), api_symbol)
+                else:
+                    logger.warning(
+                        "  [%s] %s has no data back to %s; the download will start where "
+                        "%s history begins. Re-run with --use-continuous-default-fallback "
+                        "to use %s for the longer history (note: the default continuous "
+                        "contract may contain gaps in TradeStation's data, e.g. "
+                        "July 18-19, 2024).",
+                        symbol, api_symbol, anchor.date(), api_symbol, symbol)
             else:
                 logger.info("  [%s] Cannot verify %s history (data starts %s); assuming it covers",
                             symbol, api_symbol, anchor.date())
@@ -310,12 +322,18 @@ class TradeStationDownloader:
             barsback = self._calc_barsback(start_date, current_end)
             data = self._api_request(api_symbol, current_end, barsback=barsback)
             if not data or "Bars" not in data or not data["Bars"]:
-                if batch_num == 0 and api_symbol != symbol:
-                    logger.info("  [%s] Custom continuous (%s) returned no data, falling back to %s", symbol, api_symbol, symbol)
+                if batch_num == 0 and api_symbol != symbol and self.config.use_continuous_default_fallback:
+                    logger.warning("  [%s] %s returned no data, falling back to %s (default continuous)", symbol, api_symbol, symbol)
                     api_symbol = symbol
                     data = self._api_request(api_symbol, current_end, barsback=barsback)
                     if not data or "Bars" not in data or not data["Bars"]:
                         break
+                elif batch_num == 0 and api_symbol != symbol:
+                    logger.warning(
+                        "  [%s] %s returned no data. Re-run with --use-continuous-default-fallback "
+                        "to use %s (default continuous) instead.",
+                        symbol, api_symbol, symbol)
+                    break
                 else:
                     break
 
@@ -424,6 +442,8 @@ class TradeStationDownloader:
         logger.info("Compression: %s", self.config.compression.value)
         logger.info("Incremental: %s", incremental)
         logger.info("Parallel workers: %d", self.config.max_workers)
+        logger.info("Continuous default fallback: %s",
+                    "on" if self.config.use_continuous_default_fallback else "off")
         logger.info("#" * 60)
 
     def _log_summary(self) -> None:

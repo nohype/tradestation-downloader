@@ -30,6 +30,7 @@ def _make_args(**overrides):
         "no_datetime_index": False,
         "workers": 4,
         "verbose": False,
+        "use_continuous_default_fallback": False,
     }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -164,6 +165,39 @@ class TestRunDownload:
         mock_downloader.return_value.download_all.assert_called_once_with(
             incremental=True
         )
+
+    def test_use_continuous_default_fallback_flag_enables_config(self):
+        """--use-continuous-default-fallback sets the config field."""
+        config = _make_config(symbols=["@RTY"])
+        args = _make_args(use_continuous_default_fallback=True)
+
+        with (
+            patch("tradestation.cli.load_config", return_value=config),
+            patch("tradestation.cli.TradeStationDownloader") as mock_downloader,
+        ):
+            mock_downloader.return_value.stats.errors = 0
+
+            result = run_download(args)
+
+        assert result == 0
+        assert config.use_continuous_default_fallback is True
+        mock_downloader.assert_called_once_with(config)
+
+    def test_use_continuous_default_fallback_off_by_default(self):
+        """Without the flag the config field stays False."""
+        config = _make_config(symbols=["@RTY"])
+        args = _make_args()
+
+        with (
+            patch("tradestation.cli.load_config", return_value=config),
+            patch("tradestation.cli.TradeStationDownloader") as mock_downloader,
+        ):
+            mock_downloader.return_value.stats.errors = 0
+
+            result = run_download(args)
+
+        assert result == 0
+        assert config.use_continuous_default_fallback is False
 
     def test_all_categories_invalid_category_logs_error_and_returns(self, caplog):
         """--all-categories logs a config error and returns when a category is invalid."""
