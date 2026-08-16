@@ -16,6 +16,7 @@ from tradestation.metadata import (
     fetch_quote_snapshots,
     fetch_symbol_details,
     get_exchange_timezone,
+    resolve_api_symbols,
     run_metadata,
 )
 
@@ -428,6 +429,109 @@ class TestFetchQuoteSnapshots:
         assert mock_get.call_count == 1
 
 
+class TestResolveApiSymbols:
+    """Tests for resolve_api_symbols (plain-first, =11INC fallback)."""
+
+    @pytest.fixture
+    def auth(self):
+        """Pre-warmed TradeStationAuth instance to avoid network calls."""
+        auth = TradeStationAuth("client_id", "client_secret", "refresh_token")
+        auth._access_token = "test_token"
+        auth._token_expiry = datetime.now() + timedelta(hours=1)
+        return auth
+
+    def _mock_response(self, payload, status_code=200):
+        resp = Mock()
+        resp.status_code = status_code
+        resp.text = "error"
+        resp.json.return_value = payload
+        return resp
+
+    def test_plain_preferred_when_it_resolves(self, auth):
+        """@ES resolves in plain form; the suffixed form is not needed."""
+        with (
+            patch("tradestation.metadata.requests.get") as mock_get,
+            patch("tradestation.metadata.time.sleep"),
+        ):
+            mock_get.side_effect = [
+                self._mock_response({"Symbols": [{"Symbol": "@ES"}]}),
+                self._mock_response({"Symbols": [{"Symbol": "@ES=11INC"}]}),
+            ]
+            mapping = resolve_api_symbols(auth, ["@ES"])
+
+        assert mapping == {"@ES": "@ES"}
+        assert mock_get.call_count == 2
+
+    def test_falls_back_to_suffixed_when_plain_invalid(self, auth):
+        """Plain @PA is not resolvable on the API; @PA=11INC is used instead."""
+        with (
+            patch("tradestation.metadata.requests.get") as mock_get,
+            patch("tradestation.metadata.time.sleep"),
+        ):
+            mock_get.side_effect = [
+                self._mock_response(
+                    {"Symbols": [], "Errors": [{"Symbol": "@PA", "Error": "NotFound"}]}
+                ),
+                self._mock_response({"Symbols": [{"Symbol": "@PA=11INC"}]}),
+            ]
+            mapping = resolve_api_symbols(auth, ["@PA"])
+
+        assert mapping == {"@PA": "@PA=11INC"}
+        assert mock_get.call_count == 2
+
+    def test_keeps_plain_when_suffixed_invalid(self, auth):
+        """ICE symbols like @KC resolve plain but not with the =11INC suffix."""
+        with (
+            patch("tradestation.metadata.requests.get") as mock_get,
+            patch("tradestation.metadata.time.sleep"),
+        ):
+            mock_get.side_effect = [
+                self._mock_response({"Symbols": [{"Symbol": "@KC"}]}),
+                self._mock_response(
+                    {"Symbols": [], "Errors": [{"Symbol": "@KC=11INC", "Error": "NotFound"}]}
+                ),
+            ]
+            mapping = resolve_api_symbols(auth, ["@KC"])
+
+        assert mapping == {"@KC": "@KC"}
+        assert mock_get.call_count == 2
+
+    def test_mixed_symbols_resolve_per_symbol(self, auth):
+        """One batch probe for plain forms and one for suffixed forms."""
+        with (
+            patch("tradestation.metadata.requests.get") as mock_get,
+            patch("tradestation.metadata.time.sleep"),
+        ):
+            mock_get.side_effect = [
+                self._mock_response({"Symbols": [{"Symbol": "@ES"}, {"Symbol": "@KC"}]}),
+                self._mock_response({"Symbols": [{"Symbol": "@PA=11INC"}]}),
+            ]
+            mapping = resolve_api_symbols(auth, ["@ES", "@KC", "@PA"])
+
+        assert mapping == {"@ES": "@ES", "@KC": "@KC", "@PA": "@PA=11INC"}
+        assert mock_get.call_count == 2
+
+    def test_plain_probes_are_batched_by_50(self, auth):
+        """60 symbols without @ prefix need only the plain-form probe (2 batches)."""
+        symbols = [f"S{i}" for i in range(60)]
+        first_payload = {"Symbols": [{"Symbol": s} for s in symbols[:50]]}
+        second_payload = {"Symbols": [{"Symbol": s} for s in symbols[50:]]}
+
+        with (
+            patch("tradestation.metadata.requests.get") as mock_get,
+            patch("tradestation.metadata.time.sleep") as mock_sleep,
+        ):
+            mock_get.side_effect = [
+                self._mock_response(first_payload),
+                self._mock_response(second_payload),
+            ]
+            mapping = resolve_api_symbols(auth, symbols)
+
+        assert mapping == {s: s for s in symbols}
+        assert mock_get.call_count == 2
+        assert mock_sleep.call_count == 1
+
+
 class TestGetFirstTimestamp:
     """Tests for StorageBackend.get_first_timestamp overrides."""
 
@@ -556,6 +660,7 @@ class TestRunMetadata:
             patch("tradestation.metadata.load_config", return_value=config),
             patch("tradestation.metadata.TradeStationAuth", return_value=auth),
             patch("tradestation.metadata.datetime", _FixedDateTime),
+            patch("tradestation.metadata.resolve_api_symbols", return_value={"@ES": "@ES"}),
             patch(
                 "tradestation.metadata.requests.get", side_effect=[details_resp, quotes_resp]
             ) as mock_get,
@@ -631,6 +736,7 @@ class TestRunMetadata:
         with (
             patch("tradestation.metadata.load_config", return_value=config),
             patch("tradestation.metadata.TradeStationAuth", return_value=auth),
+            patch("tradestation.metadata.resolve_api_symbols", return_value={"@ES": "@ES"}),
             patch("tradestation.metadata.requests.get", return_value=error_resp) as mock_get,
             patch("tradestation.metadata.time.sleep"),
         ):
@@ -675,6 +781,7 @@ class TestRunMetadata:
             patch("tradestation.metadata.load_config", return_value=config),
             patch("tradestation.metadata.TradeStationAuth", return_value=auth),
             patch("tradestation.metadata.datetime", _FixedDateTime),
+            patch("tradestation.metadata.resolve_api_symbols", return_value={"@ES": "@ES"}),
             patch(
                 "tradestation.metadata.requests.get", side_effect=[details_resp, quotes_resp]
             ) as mock_get,
@@ -726,6 +833,7 @@ class TestRunMetadata:
         with (
             patch("tradestation.metadata.load_config", return_value=config),
             patch("tradestation.metadata.TradeStationAuth", return_value=auth),
+            patch("tradestation.metadata.resolve_api_symbols", return_value={symbol: symbol}),
             patch("tradestation.metadata.fetch_symbol_details", return_value=details),
             patch("tradestation.metadata.fetch_quote_snapshots", return_value=quotes),
             patch("tradestation.metadata.datetime", _FixedDateTime),
@@ -762,6 +870,7 @@ class TestRunMetadata:
         with (
             patch("tradestation.metadata.load_config", return_value=config),
             patch("tradestation.metadata.TradeStationAuth", return_value=auth),
+            patch("tradestation.metadata.resolve_api_symbols", return_value={symbol: symbol}),
             patch("tradestation.metadata.fetch_symbol_details", return_value=details),
             patch("tradestation.metadata.fetch_quote_snapshots", return_value=quotes),
             patch("tradestation.metadata.datetime", _FixedDateTime),
@@ -942,6 +1051,7 @@ class TestDeriveSessions:
             patch("tradestation.metadata.load_config", return_value=config),
             patch("tradestation.metadata.TradeStationAuth", return_value=auth),
             patch("tradestation.metadata.datetime", _FixedDateTime),
+            patch("tradestation.metadata.resolve_api_symbols", return_value={"@ES": "@ES"}),
             patch(
                 "tradestation.metadata.requests.get", side_effect=[details_resp, quotes_resp]
             ) as mock_get,
