@@ -15,7 +15,7 @@ import pandas as pd
 import requests
 
 from .auth import AuthenticationError, TradeStationAuth
-from .models import DownloadConfig, validate_symbol
+from .models import CONTINUOUS_SUFFIX, DownloadConfig, apply_continuous_suffix, validate_symbol
 from .storage import create_storage
 
 logger = logging.getLogger(__name__)
@@ -220,15 +220,24 @@ class TradeStationDownloader:
 
     def _fetch_bars(self, symbol: str, start_date: datetime) -> pd.DataFrame:
         """Fetch all bars for a symbol from start_date to now."""
+        # Apply custom continuous suffix; fall back to plain symbol if first batch is empty
+        api_symbol = apply_continuous_suffix(symbol)
         all_bars = []
         current_end = datetime.now(UTC).replace(tzinfo=None)
         batch_num = 0
 
         while current_end > start_date:
             barsback = self._calc_barsback(start_date, current_end)
-            data = self._api_request(symbol, current_end, barsback=barsback)
+            data = self._api_request(api_symbol, current_end, barsback=barsback)
             if not data or "Bars" not in data or not data["Bars"]:
-                break
+                if batch_num == 0 and api_symbol != symbol:
+                    logger.info("  [%s] Custom continuous (%s) returned no data, falling back to %s", symbol, api_symbol, symbol)
+                    api_symbol = symbol
+                    data = self._api_request(api_symbol, current_end, barsback=barsback)
+                    if not data or "Bars" not in data or not data["Bars"]:
+                        break
+                else:
+                    break
 
             bars = data["Bars"]
             all_bars.extend(bars)

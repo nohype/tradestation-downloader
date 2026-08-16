@@ -83,6 +83,13 @@ def validate_symbol(symbol: str) -> None:
         )
 
 
+# Custom continuous contract suffix for explicit roll/adjustment control.
+# =11INC: 1st nearest, OI-based roll, 1st instance of higher OI, constant (Panama) adjustment.
+# This avoids data gaps present in the default @ continuous contract (which uses undocumented
+# internal stitching that has known gaps, e.g. July 18, 2024 for @NG/@ES).
+# Applied automatically to all @ symbols; falls back to plain @ if the API doesn't support it.
+CONTINUOUS_SUFFIX = "=11INC"
+
 # Default US Futures symbols organized by category
 DEFAULT_SYMBOLS = {
     "index": [
@@ -104,7 +111,6 @@ DEFAULT_SYMBOLS = {
         "@NG",    # Natural Gas
         "@RB",    # RBOB Gasoline
         "@HO",    # Heating Oil
-        "@BRN",   # Brent Crude Oil
     ],
     "micro_energy": [
         "@MCL",   # Micro Crude Oil
@@ -129,7 +135,6 @@ DEFAULT_SYMBOLS = {
         "@TU",    # 2 Year US Treasury Note
         "@UB",    # Ultra T-Bond
         "@TEN",   # Ultra 10-Year Treasury Note
-        "@TWE",   # 20 Year US Treasury Bond
     ],
     "grains": [
         "@C",     # Corn
@@ -171,6 +176,17 @@ DEFAULT_SYMBOLS = {
         "@MET",   # CME Micro Ether Futures
     ],
 }
+
+
+def apply_continuous_suffix(symbol: str) -> str:
+    """Apply custom continuous contract suffix to a symbol if applicable.
+
+    Appends CONTINUOUS_SUFFIX (=11INC) to @ continuous contract symbols,
+    unless the user already specified custom parameters (contains '=').
+    """
+    if not symbol.startswith("@") or "=" in symbol:
+        return symbol
+    return symbol + CONTINUOUS_SUFFIX
 
 
 def get_all_symbols() -> list[str]:
