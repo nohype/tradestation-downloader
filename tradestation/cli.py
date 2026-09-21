@@ -40,6 +40,7 @@ Examples:
   %(prog)s --list-symbols           List all default symbols
   %(prog)s --list-categories        List symbol categories
   %(prog)s --all-categories         Download symbols from all configured categories
+  %(prog)s -s @ES --rollcheck       Check whether to roll each symbol's front contract
 """,
     )
 
@@ -117,6 +118,11 @@ Examples:
         "--export-ts-csv",
         action="store_true",
         help="Export downloaded data to TradeStation third-party ASCII format files (<symbol>_ts.txt) in a 'plain_data' sibling directory, then exit",
+    )
+    parser.add_argument(
+        "--rollcheck",
+        action="store_true",
+        help="Check whether to roll each symbol's front contract to the next, then exit",
     )
     parser.add_argument(
         "-w", "--workers",
@@ -216,6 +222,10 @@ def run_download(args: argparse.Namespace) -> int:
     # Validate symbols
     for symbol in config.symbols:
         validate_symbol(symbol)
+
+    if args.rollcheck:
+        from .rollcheck import run_rollcheck
+        return run_rollcheck(config)
 
     # Override storage format if provided
     if args.storage_format:

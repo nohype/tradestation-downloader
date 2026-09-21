@@ -22,6 +22,7 @@ def _make_args(**overrides):
         "metadata": False,
         "export_csv": False,
         "export_ts_csv": False,
+        "rollcheck": False,
         "symbols": None,
         "category": None,
         "all_categories": False,

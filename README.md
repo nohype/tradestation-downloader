@@ -88,6 +88,9 @@ tradestation-download -w 8
 
 # Sequential download (no parallelism)
 tradestation-download -w 1
+
+# Check whether each symbol's front contract should roll to the next
+tradestation-download --rollcheck
 ```
 
 > **Note:** On Windows, the `@` symbol has special meaning in CMD/PowerShell.
