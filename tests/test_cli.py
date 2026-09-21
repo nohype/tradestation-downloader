@@ -4,7 +4,7 @@ import argparse
 import logging
 from unittest.mock import patch
 
-from tradestation.cli import run_download
+from tradestation.cli import create_download_parser, run_download
 from tradestation.config import ConfigurationError
 from tradestation.models import (
     DEFAULT_SYMBOLS,
@@ -21,6 +21,7 @@ def _make_args(**overrides):
         "list_categories": False,
         "metadata": False,
         "export_csv": False,
+        "export_ts_csv": False,
         "symbols": None,
         "category": None,
         "all_categories": False,
@@ -215,3 +216,76 @@ class TestRunDownload:
         assert result == 1
         assert "Unknown category: 'indexx'" in caplog.text
         mock_downloader.assert_not_called()
+
+    def test_export_ts_csv_flag_parsed(self):
+        """--export-ts-csv sets export_ts_csv on the parsed namespace."""
+        args = create_download_parser().parse_args(["--export-ts-csv"])
+        assert args.export_ts_csv is True
+        assert args.export_csv is False
+
+    def test_export_ts_csv_routes_to_ts_export(self):
+        """--export-ts-csv alone calls run_export_ts_csv and exits."""
+        args = _make_args(export_ts_csv=True, symbols=["@ES"])
+
+        with (
+            patch("tradestation.csv_export.run_export_csv") as mock_csv,
+            patch(
+                "tradestation.csv_export.run_export_ts_csv", return_value=0
+            ) as mock_ts,
+            patch("tradestation.cli.TradeStationDownloader") as mock_downloader,
+        ):
+            result = run_download(args)
+
+        assert result == 0
+        mock_ts.assert_called_once_with("config.yaml", ["@ES"])
+        mock_csv.assert_not_called()
+        mock_downloader.assert_not_called()
+
+    def test_export_ts_csv_failure_returns_1(self):
+        """A failing TS export propagates exit code 1."""
+        args = _make_args(export_ts_csv=True)
+
+        with patch(
+            "tradestation.csv_export.run_export_ts_csv", return_value=1
+        ):
+            result = run_download(args)
+
+        assert result == 1
+
+    def test_both_export_flags_run_both_exports(self):
+        """--export-csv and --export-ts-csv together run both exports."""
+        args = _make_args(export_csv=True, export_ts_csv=True, symbols=["@ES"])
+
+        with (
+            patch(
+                "tradestation.csv_export.run_export_csv", return_value=0
+            ) as mock_csv,
+            patch(
+                "tradestation.csv_export.run_export_ts_csv", return_value=0
+            ) as mock_ts,
+            patch("tradestation.cli.TradeStationDownloader") as mock_downloader,
+        ):
+            result = run_download(args)
+
+        assert result == 0
+        mock_csv.assert_called_once_with("config.yaml", ["@ES"])
+        mock_ts.assert_called_once_with("config.yaml", ["@ES"])
+        mock_downloader.assert_not_called()
+
+    def test_both_export_flags_failure_still_runs_both(self):
+        """When the CSV export fails, the TS export still runs and exit is 1."""
+        args = _make_args(export_csv=True, export_ts_csv=True)
+
+        with (
+            patch(
+                "tradestation.csv_export.run_export_csv", return_value=1
+            ) as mock_csv,
+            patch(
+                "tradestation.csv_export.run_export_ts_csv", return_value=0
+            ) as mock_ts,
+        ):
+            result = run_download(args)
+
+        assert result == 1
+        mock_csv.assert_called_once()
+        mock_ts.assert_called_once()

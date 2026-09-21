@@ -114,6 +114,11 @@ Examples:
         help="Export downloaded data to CSV (.txt) files in a 'plain_data' sibling directory, then exit",
     )
     parser.add_argument(
+        "--export-ts-csv",
+        action="store_true",
+        help="Export downloaded data to TradeStation third-party ASCII format files (<symbol>_ts.txt) in a 'plain_data' sibling directory, then exit",
+    )
+    parser.add_argument(
         "-w", "--workers",
         type=int,
         default=4,
@@ -177,9 +182,14 @@ def run_download(args: argparse.Namespace) -> int:
         from .metadata import run_metadata
         return run_metadata(args.config)
 
-    if args.export_csv:
-        from .csv_export import run_export_csv
-        return run_export_csv(args.config, args.symbols)
+    if args.export_csv or args.export_ts_csv:
+        from .csv_export import run_export_csv, run_export_ts_csv
+        results = []
+        if args.export_csv:
+            results.append(run_export_csv(args.config, args.symbols))
+        if args.export_ts_csv:
+            results.append(run_export_ts_csv(args.config, args.symbols))
+        return 0 if all(result == 0 for result in results) else 1
 
     # Load configuration
     try:
