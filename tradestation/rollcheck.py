@@ -263,9 +263,28 @@ def check_symbol(
     return row
 
 
-def _fmt_num(value: int | None) -> str:
-    """Format a number with thousands separators, or n/a."""
-    return f"{value:,}" if value is not None else NA
+_MONTH_CODES = "FGHJKMNQUVXZ"
+_MONTH_NAMES = (
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+)
+
+
+def describe_contract(name: str | None, expiry: date | None) -> str:
+    """Describe a contract as '<Mon YYYY>' (e.g. 'Nov 2026').
+
+    Prefers the contract symbol's month code, which is the contract month even
+    when expiration falls in the prior month (e.g. CL); falls back to the
+    expiration date, then n/a.
+    """
+    if name:
+        match = re.fullmatch(r"[A-Z]+([FGHJKMNQUVXZ])(\d{1,2})", name)
+        if match:
+            month = _MONTH_NAMES[_MONTH_CODES.index(match.group(1))]
+            return f"{month} {2000 + int(match.group(2))}"
+    if expiry is not None:
+        return expiry.strftime("%b %Y")
+    return NA
 
 
 def _fmt_ratio(next_value: int | None, current_value: int | None) -> str:
@@ -277,17 +296,29 @@ def _fmt_ratio(next_value: int | None, current_value: int | None) -> str:
     return f"{next_value / current_value * 100:.1f}%"
 
 
-def _print_table(headers: list[str], rows: list[list[str]]) -> None:
-    """Print a plain ASCII table with | separators."""
+def _print_table(
+    headers: list[str],
+    rows: list[list[str]],
+    aligns: list[str] | None = None,
+) -> None:
+    """Print a plain ASCII table with | separators.
+
+    aligns: per-column '<' (left, default) or '>' (right) alignment.
+    """
+    if aligns is None:
+        aligns = ["<"] * len(headers)
     widths = [len(h) for h in headers]
     for row in rows:
         for i, cell in enumerate(row):
             widths[i] = max(widths[i], len(cell))
-    header_line = " | ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
-    print(header_line)
+
+    def fmt(cell: str, i: int) -> str:
+        return cell.rjust(widths[i]) if aligns[i] == ">" else cell.ljust(widths[i])
+
+    print(" | ".join(fmt(h, i) for i, h in enumerate(headers)))
     print("-+-".join("-" * widths[i] for i in range(len(headers))))
     for row in rows:
-        print(" | ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)))
+        print(" | ".join(fmt(cell, i) for i, cell in enumerate(row)))
 
 
 def run_rollcheck(config: DownloadConfig) -> int:
@@ -323,52 +354,57 @@ def run_rollcheck(config: DownloadConfig) -> int:
     if not rows:
         return 1
 
-    # Context line: last completed trading day, when all resolved symbols agree.
+    # Header: run date, data day (when all resolved symbols agree), the rule
+    # with its days-to-expiry threshold, and the headline result.
     days = [r.day for r in rows if r.day is not None]
+    roll_count = sum(1 for r in rows if r.rollover == "YES")
+    print(f"Rollover check - {date.today().isoformat()}")
     if days:
-        if len(set(days)) == 1:
-            print(f"Last completed trading day: {days[0].strftime('%Y-%m-%d')}")
-        else:
-            print("Last completed trading day: varies by symbol")
-        print()
-
-    table1 = []
-    table2 = []
-    for row in rows:
-        marker = " (!)" if row.warning else ""
-        current_cell = (row.current or row.symbol) + marker
-        next_cell = row.next if row.next else NA
-        table1.append(
-            [
-                current_cell,
-                _fmt_num(row.current_oi),
-                _fmt_num(row.current_vol),
-                next_cell,
-                _fmt_num(row.next_oi),
-                _fmt_num(row.next_vol),
-            ]
-        )
-        recommended = row.next if row.rollover == "YES" else (row.current or NA)
-        table2.append(
-            [
-                row.symbol,
-                _fmt_ratio(row.next_oi, row.current_oi),
-                _fmt_ratio(row.next_vol, row.current_vol),
-                row.rollover,
-                recommended,
-            ]
-        )
-
-    _print_table(
-        ["current", "current OI", "current Vol", "next", "next OI", "next Vol"],
-        table1,
+        data_day = days[0].isoformat() if len(set(days)) == 1 else "varies by symbol"
+        print(f"Data day: {data_day}")
+    print(
+        f"Roll rule: next OI or Vol higher, or current contract expires "
+        f"within {config.roll_days} days"
+    )
+    print(
+        f"Roll recommended: {roll_count} of {len(rows)} "
+        f"symbol{'' if len(rows) == 1 else 's'}"
     )
     print()
-    print("-" * 60)
-    print()
+
+    table = []
+    for row in rows:
+        current_cell = (
+            f"{row.current} {describe_contract(row.current, row.current_expiry)}"
+            if row.current
+            else NA
+        )
+        next_cell = (
+            f"{row.next} {describe_contract(row.next, row.next_expiry)}" if row.next else NA
+        )
+        if row.rollover == "YES":
+            action = f"ROLL -> {row.next}" if row.next else "ROLL"
+        elif row.current:
+            action = f"keep {row.current}"
+        else:
+            action = NA
+        table.append(
+            [
+                row.symbol + (" (!)" if row.warning else ""),
+                current_cell,
+                next_cell,
+                _fmt_ratio(row.next_oi, row.current_oi),
+                _fmt_ratio(row.next_vol, row.current_vol),
+                row.current_expiry.isoformat() if row.current_expiry else NA,
+                str(row.days_to_expiry) if row.days_to_expiry is not None else NA,
+                action,
+            ]
+        )
+
     _print_table(
-        ["symbol", "next/current OI", "next/current Vol", "rollover", "recommended"],
-        table2,
+        ["Symbol", "Current", "Next", "OI next/cur", "Vol next/cur", "Expires", "Days", "Action"],
+        table,
+        aligns=["<", "<", "<", ">", ">", "<", ">", "<"],
     )
 
     all_warnings = [w for row in rows for w in row.warnings]

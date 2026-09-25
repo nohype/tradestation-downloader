@@ -10,6 +10,7 @@ from tradestation.rollcheck import (
     _fmt_ratio,
     bar_for_day,
     check_symbol,
+    describe_contract,
     fetch_contract_chain,
     last_closed_bar,
     run_rollcheck,
@@ -106,6 +107,12 @@ def _expiry(days_ahead):
 def _dt(days_ahead):
     """A UTC datetime N days in the future, as returned by fetch_contract_chain."""
     return datetime.combine(date.today() + timedelta(days=days_ahead), datetime.min.time(), UTC)
+
+
+def _table_cells(out, symbol):
+    """Return the stripped cells of the result-table row for a symbol."""
+    line = next(line for line in out.splitlines() if line.startswith(symbol))
+    return [cell.strip() for cell in line.split("|")]
 
 
 def _expiry_iso(days_ahead):
@@ -232,28 +239,24 @@ class TestRolloverCriterion:
     def test_yes_on_oi_only(self, capsys):
         code, out = self._run_es(capsys, 1000, 5000, 1500, 100)
         assert code == 0
-        assert "YES" in out
+        assert "ROLL" in out
 
-    def test_recommended_is_next_on_yes(self, capsys):
+    def test_action_is_roll_to_next_on_yes(self, capsys):
         _, out = self._run_es(capsys, 1000, 5000, 1500, 100)
-        table2 = out.split("-" * 60)[1]
-        row = [line for line in table2.splitlines() if line.startswith("@ES")][0]
-        assert row.rsplit("|", 1)[1].strip() == "ESH26"
+        assert _table_cells(out, "@ES")[-1] == "ROLL -> ESH26"
 
-    def test_recommended_is_current_on_no(self, capsys):
+    def test_action_is_keep_current_on_no(self, capsys):
         _, out = self._run_es(capsys, 5000, 9000, 1000, 100)
-        table2 = out.split("-" * 60)[1]
-        row = [line for line in table2.splitlines() if line.startswith("@ES")][0]
-        assert row.rsplit("|", 1)[1].strip() == "ESZ25"
+        assert _table_cells(out, "@ES")[-1] == "keep ESZ25"
 
     def test_yes_on_vol_only(self, capsys):
         code, out = self._run_es(capsys, 5000, 100, 1000, 9000)
-        assert "YES" in out
+        assert "ROLL" in out
 
     def test_no_when_neither(self, capsys):
         code, out = self._run_es(capsys, 5000, 9000, 1000, 100)
-        assert "no" in out
-        assert "YES" not in out
+        assert "keep" in out
+        assert "ROLL" not in out
 
     def test_percent_formatting(self, capsys):
         # next OI 1046 / current 1000 = 104.6%
@@ -263,7 +266,7 @@ class TestRolloverCriterion:
     def test_inf_ratio_when_current_zero(self, capsys):
         code, out = self._run_es(capsys, 0, 0, 500, 0)
         assert "inf" in out
-        assert "YES" in out
+        assert "ROLL" in out
 
     def test_ratio_helper(self):
         assert _fmt_ratio(1046, 1000) == "104.6%"
@@ -291,20 +294,20 @@ class TestExpiryTrigger:
         # 6 days to expiry, lower next OI and Vol: expiry alone forces the roll
         code, out = self._run_es(capsys, 6, 5000, 9000, 1000, 100)
         assert code == 0
-        assert "YES" in out
+        assert "ROLL" in out
 
     def test_no_trigger_beyond_default_threshold(self, capsys):
         code, out = self._run_es(capsys, 7, 5000, 9000, 1000, 100)
-        assert "no" in out
-        assert "YES" not in out
+        assert "keep" in out
+        assert "ROLL" not in out
 
     def test_custom_threshold(self, capsys):
         code, out = self._run_es(capsys, 10, 5000, 9000, 1000, 100, roll_days=10)
-        assert "YES" in out
+        assert "ROLL" in out
 
     def test_custom_threshold_not_reached(self, capsys):
         _, out = self._run_es(capsys, 10, 5000, 9000, 1000, 100, roll_days=9)
-        assert "YES" not in out
+        assert "ROLL" not in out
 
     def test_triggers_even_when_next_bar_missing(self, capsys):
         # The expiry safety net must fire even when next-contract data is unavailable
@@ -318,7 +321,7 @@ class TestExpiryTrigger:
         }
         code, out = _run(capsys, chains={"ES": chain}, bars=bars)
         assert code == 0
-        assert "YES" in out
+        assert "ROLL" in out
 
     def test_check_symbol_sets_expiry_fields(self):
         chain = [
@@ -338,6 +341,80 @@ class TestExpiryTrigger:
         assert row.rollover == "YES"
 
 
+class TestDescribeContract:
+    """Contract month/year descriptions."""
+
+    def test_parses_month_code_from_symbol(self):
+        assert describe_contract("ESZ25", None) == "Dec 2025"
+        assert describe_contract("ESH26", None) == "Mar 2026"
+        assert describe_contract("CLF26", None) == "Jan 2026"
+
+    def test_symbol_month_wins_over_expiry(self):
+        # CLF26 is the Jan 2026 contract even though it expires in late Dec 2025
+        assert describe_contract("CLF26", date(2025, 12, 22)) == "Jan 2026"
+
+    def test_falls_back_to_expiry(self):
+        assert describe_contract("ODD", date(2026, 11, 15)) == "Nov 2026"
+
+    def test_na_when_unknown(self):
+        assert describe_contract(None, None) == "n/a"
+
+
+class TestOutputLayout:
+    """Header context and table structure of the rollcheck report."""
+
+    def test_header_states_rule_and_default_threshold(self, capsys):
+        _, out = _run(capsys, chains={"ES": _es_chain()})
+        assert "Rollover check -" in out
+        assert "Roll rule:" in out
+        assert "within 6 days" in out
+
+    def test_header_threshold_follows_roll_days(self, capsys):
+        _, out = _run(capsys, chains={"ES": _es_chain()}, config=_make_config(roll_days=10))
+        assert "within 10 days" in out
+
+    def test_contracts_described_with_month_year(self, capsys):
+        _, out = _run(capsys, chains={"ES": _es_chain()})
+        assert "ESZ25 Dec 2025" in out
+        assert "ESH26 Mar 2026" in out
+
+    def test_expiry_and_days_columns_populated(self, capsys):
+        bars = {
+            "ESZ25": [_bar("2025-12-05T00:00:00Z", 5000, 1000)],
+            "ESH26": [_bar("2025-12-05T00:00:00Z", 100, 10)],
+        }
+        _, out = _run(capsys, chains={"ES": _es_chain()}, bars=bars)
+        cells = _table_cells(out, "@ES")
+        assert cells[5] == (date.today() + timedelta(days=30)).isoformat()
+        assert cells[6] == "30"
+
+    def test_headline_count_singular(self, capsys):
+        _, out = _run(capsys, chains={"ES": _es_chain()})
+        assert "Roll recommended: 0 of 1 symbol" in out
+
+    def test_headline_count_plural(self, capsys):
+        chains = {
+            "ES": _es_chain(),
+            "NQ": [
+                _contract("NQZ25", _expiry(30)),
+                _contract("NQH26", _expiry(120)),
+            ],
+        }
+        bars = {
+            "ESZ25": [_bar("2025-12-05T00:00:00Z", 5000, 1000)],
+            "ESH26": [_bar("2025-12-05T00:00:00Z", 100, 10)],
+            "NQZ25": [_bar("2025-12-05T00:00:00Z", 4000, 900)],
+            "NQH26": [_bar("2025-12-05T00:00:00Z", 90, 9)],
+        }
+        _, out = _run(
+            capsys,
+            chains=chains,
+            bars=bars,
+            config=_make_config(symbols=["@ES", "@NQ"]),
+        )
+        assert "Roll recommended: 0 of 2 symbols" in out
+
+
 class TestMissingAndErrorData:
     """Missing data and error handling."""
 
@@ -349,7 +426,7 @@ class TestMissingAndErrorData:
         code, out = _run(capsys, chains={"ES": _es_chain()}, bars=bars)
         assert code == 0
         assert "n/a" in out
-        assert "YES" not in out
+        assert "ROLL" not in out
         assert "(!)" in out
         assert "Warnings" in out
         assert "no bar for" in out
@@ -396,9 +473,7 @@ class TestMissingAndErrorData:
         ):
             run_rollcheck(_make_config())
         out = capsys.readouterr().out
-        table2 = out.split("-" * 60)[1]
-        row = [line for line in table2.splitlines() if line.startswith("@ES")][0]
-        assert row.rsplit("|", 1)[1].strip() == "n/a"
+        assert _table_cells(out, "@ES")[-1] == "n/a"
 
     def test_fewer_than_two_contracts_warns(self, capsys):
         code, out = _run(capsys, chains={"ES": [_contract("ESZ25", _expiry(30))]})
@@ -411,7 +486,7 @@ class TestMissingAndErrorData:
             "ESH26": [_bar("2025-12-05T00:00:00Z", 100, 10)],
         }
         _, out = _run(capsys, chains={"ES": _es_chain()}, bars=bars)
-        assert "Last completed trading day: 2025-12-05" in out
+        assert "Data day: 2025-12-05" in out
 
     def test_context_line_varies_when_days_differ(self, capsys):
         chains = {
@@ -433,7 +508,7 @@ class TestMissingAndErrorData:
             bars=bars,
             config=_make_config(symbols=["@ES", "@NQ"]),
         )
-        assert "Last completed trading day: varies by symbol" in out
+        assert "Data day: varies by symbol" in out
 
 
 class TestCliDispatch:
