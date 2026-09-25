@@ -9,7 +9,7 @@ from datetime import UTC, date, datetime
 import requests
 
 from .auth import TradeStationAuth
-from .metadata import fetch_symbol_details, resolve_api_symbols
+from .metadata import fetch_symbol_details
 from .models import DownloadConfig
 
 logger = logging.getLogger(__name__)
@@ -102,12 +102,11 @@ def resolve_roots(auth: TradeStationAuth, symbols: list[str]) -> dict[str, str]:
     Prefers the symbol-details endpoint's ``Root`` field; falls back to
     stripping the leading ``@`` and any ``=...`` suffix.
     """
-    api_symbols = resolve_api_symbols(auth, symbols)
-    details = fetch_symbol_details(auth, list(api_symbols.values()))
+    details = fetch_symbol_details(auth, symbols)
     details_by_symbol = {d.get("Symbol"): d for d in details}
     roots = {}
     for symbol in symbols:
-        detail = details_by_symbol.get(api_symbols.get(symbol, symbol)) or {}
+        detail = details_by_symbol.get(symbol) or {}
         root = detail.get("Root")
         if not root:
             root = symbol.lstrip("@").split("=", 1)[0]

@@ -4,6 +4,8 @@ import argparse
 import logging
 from unittest.mock import patch
 
+import pytest
+
 from tradestation.cli import create_download_parser, run_download
 from tradestation.config import ConfigurationError
 from tradestation.models import (
@@ -33,7 +35,6 @@ def _make_args(**overrides):
         "no_datetime_index": False,
         "workers": 4,
         "verbose": False,
-        "use_continuous_default_fallback": False,
     }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -169,8 +170,13 @@ class TestRunDownload:
             incremental=True
         )
 
-    def test_use_continuous_default_fallback_flag_enables_config(self):
-        """--use-continuous-default-fallback sets the config field."""
+    def test_use_continuous_default_fallback_flag_is_rejected(self):
+        """The removed --use-continuous-default-fallback flag must not parse."""
+        with pytest.raises(SystemExit):
+            create_download_parser().parse_args(["--use-continuous-default-fallback"])
+
+    def test_run_download_does_not_set_fallback_attribute(self):
+        """run_download must not create use_continuous_default_fallback on the config."""
         config = _make_config(symbols=["@RTY"])
         args = _make_args(use_continuous_default_fallback=True)
 
@@ -183,24 +189,13 @@ class TestRunDownload:
             result = run_download(args)
 
         assert result == 0
-        assert config.use_continuous_default_fallback is True
+        assert not hasattr(config, "use_continuous_default_fallback")
         mock_downloader.assert_called_once_with(config)
 
-    def test_use_continuous_default_fallback_off_by_default(self):
-        """Without the flag the config field stays False."""
-        config = _make_config(symbols=["@RTY"])
-        args = _make_args()
-
-        with (
-            patch("tradestation.cli.load_config", return_value=config),
-            patch("tradestation.cli.TradeStationDownloader") as mock_downloader,
-        ):
-            mock_downloader.return_value.stats.errors = 0
-
-            result = run_download(args)
-
-        assert result == 0
-        assert config.use_continuous_default_fallback is False
+    def test_download_config_has_no_fallback_attribute(self):
+        """DownloadConfig no longer has a use_continuous_default_fallback field."""
+        config = _make_config()
+        assert not hasattr(config, "use_continuous_default_fallback")
 
     def test_all_categories_invalid_category_logs_error_and_returns(self, caplog):
         """--all-categories logs a config error and returns when a category is invalid."""

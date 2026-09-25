@@ -13,7 +13,6 @@ import requests
 
 from .auth import TradeStationAuth
 from .config import ConfigurationError, load_config
-from .models import apply_continuous_suffix
 from .storage import create_storage, detect_storage_format
 
 logger = logging.getLogger(__name__)
@@ -186,61 +185,6 @@ def fetch_quote_snapshots(auth: TradeStationAuth, symbols: list[str]) -> list[di
     return quotes
 
 
-def _which_symbols_resolve(auth: TradeStationAuth, symbols: list[str]) -> set[str]:
-    """Return the subset of symbols the symbols endpoint resolves (batched by 50)."""
-    resolved: set[str] = set()
-    headers = {
-        "Authorization": f"Bearer {auth.get_access_token()}",
-        "Content-Type": "application/json",
-    }
-    for i in range(0, len(symbols), 50):
-        batch = symbols[i : i + 50]
-        url = f"{BASE_URL}/marketdata/symbols/{','.join(batch)}"
-        try:
-            response = requests.get(url, headers=headers, timeout=30)
-            if response.status_code == 401:
-                auth.invalidate()
-                response = requests.get(url, headers=headers, timeout=30)
-            if response.status_code != 200:
-                continue
-            data = response.json()
-        except (requests.RequestException, ValueError):
-            continue
-        resolved.update(s.get("Symbol") for s in data.get("Symbols", []))
-        if i + 50 < len(symbols):
-            time.sleep(0.2)
-    return resolved
-
-
-def resolve_api_symbols(auth: TradeStationAuth, symbols: list[str]) -> dict[str, str]:
-    """Map each stored symbol to the API-resolvable symbol form.
-
-    Data files are stored under the plain symbol (e.g. @PA) while the downloader
-    queries the API with the custom continuous suffix (e.g. @PA=11INC). The
-    symbols endpoint rejects some plain continuous symbols (e.g. @PA, @UB, @TEN,
-    @LBR) and rejects the suffixed form for others (e.g. ICE symbols like @KC),
-    so prefer the plain form (it matches the stored data) and fall back to the
-    suffixed form only when the plain form does not resolve.
-    """
-    if not symbols:
-        return {}
-    suffixed = [apply_continuous_suffix(s) for s in symbols]
-    plain_ok = _which_symbols_resolve(auth, symbols)
-    suffix_ok = _which_symbols_resolve(auth, suffixed) if suffixed != symbols else plain_ok
-    mapping = {}
-    for symbol, suffix_symbol in zip(symbols, suffixed, strict=True):
-        if suffix_symbol == symbol:
-            mapping[symbol] = symbol
-        elif symbol in plain_ok:
-            mapping[symbol] = symbol
-        elif suffix_symbol in suffix_ok:
-            logger.debug("Symbol %s not resolvable; using %s", symbol, suffix_symbol)
-            mapping[symbol] = suffix_symbol
-        else:
-            mapping[symbol] = symbol
-    return mapping
-
-
 def derive_session_times(df: pd.DataFrame) -> dict:
     """Derive session start/end times for each weekday from bar data."""
     if isinstance(df.index, pd.DatetimeIndex):
@@ -364,12 +308,9 @@ def run_metadata(config_path: str = "config.yaml") -> int:
             config.client_secret,
             config.refresh_token,
         )
-        # Stored files use plain symbols (e.g. @PA) while the downloader queries
-        # the API with the custom continuous suffix; resolve the API form so the
-        # symbols endpoint is never queried with a non-resolvable plain symbol.
-        api_symbols = resolve_api_symbols(auth, symbols)
-        details = fetch_symbol_details(auth, list(api_symbols.values()))
-        quotes = fetch_quote_snapshots(auth, list(api_symbols.values()))
+        # Symbols are queried exactly as stored (no rewriting/probing).
+        details = fetch_symbol_details(auth, symbols)
+        quotes = fetch_quote_snapshots(auth, symbols)
     except Exception as e:
         logger.error("Failed to fetch metadata from TradeStation API: %s", e)
         return 1
@@ -380,12 +321,11 @@ def run_metadata(config_path: str = "config.yaml") -> int:
     try:
         symbol_metadata = {}
         for symbol in symbols:
-            api_symbol = api_symbols[symbol]
             df = storage.load(symbol)
             first = storage.get_first_timestamp(symbol)
             last = storage.get_last_timestamp(symbol)
 
-            api_data = details_by_symbol.get(api_symbol)
+            api_data = details_by_symbol.get(symbol)
             exchange = api_data.get("Exchange") if api_data else None
             tz = get_exchange_timezone(exchange)
 
@@ -417,7 +357,7 @@ def run_metadata(config_path: str = "config.yaml") -> int:
             symbol_metadata[symbol] = {
                 "symbol": symbol,
                 "api": api_data,
-                "quote": quotes_by_symbol.get(api_symbol),
+                "quote": quotes_by_symbol.get(symbol),
                 "downloaded_data": {
                     "first_timestamp": first.strftime("%Y-%m-%dT%H:%M:%S") if first else None,
                     "last_timestamp": last.strftime("%Y-%m-%dT%H:%M:%S") if last else None,

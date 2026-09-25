@@ -15,7 +15,7 @@ import pandas as pd
 import requests
 
 from .auth import AuthenticationError, TradeStationAuth
-from .models import CONTINUOUS_SUFFIX, DownloadConfig, apply_continuous_suffix, validate_symbol
+from .models import DownloadConfig, validate_symbol
 from .storage import create_storage
 
 logger = logging.getLogger(__name__)
@@ -85,7 +85,6 @@ class TradeStationDownloader:
         )
         self._stats = DownloadStats()
         self._stats_lock = Lock()  # Thread-safe stats updates
-        self._api_symbol_cache: dict[tuple[str, datetime], str] = {}
 
     @property
     def stats(self) -> DownloadStats:
@@ -219,123 +218,17 @@ class TradeStationDownloader:
         minutes_gap = int((end_date - start_date).total_seconds() / 60)
         return max(1, min(minutes_gap, self.config.max_bars_per_request))
 
-    def _resolve_api_symbol(self, symbol: str, start_date: datetime) -> str:
-        """Pick the API symbol for this download.
-
-        Prefers the custom continuous suffix (=11INC) because it avoids the
-        data gaps that exist in the plain @ continuous contract, but falls
-        back to the plain symbol when =11INC has no data covering the
-        requested history. Example: @RTY=11INC only reaches 2017-07-10 (CME
-        re-listed the E-mini Russell 2000 then), while plain @RTY reaches
-        back to 2015 and beyond.
-
-        The anchor for probing is the earliest timestamp already stored for
-        the symbol (if any), so incremental runs keep the same chain as the
-        existing file instead of mixing price bases.
-        """
-        cache_key = (symbol, start_date)
-        if cache_key in self._api_symbol_cache:
-            return self._api_symbol_cache[cache_key]
-
-        api_symbol = apply_continuous_suffix(symbol)
-        chosen = api_symbol
-        if api_symbol != symbol:
-            anchor = self._storage.get_first_timestamp(symbol) or start_date
-            now = datetime.now(UTC).replace(tzinfo=None)
-            checkpoints = []
-            for offset in (1, 365, 730):
-                cp = anchor + timedelta(days=offset)
-                if cp <= now:
-                    checkpoints.append(cp)
-            if checkpoints:
-                if all(self._has_bars_at(api_symbol, cp) for cp in checkpoints):
-                    chosen = api_symbol
-                elif self.config.use_continuous_default_fallback and all(
-                    self._has_bars_at(symbol, cp) for cp in checkpoints
-                ):
-                    logger.warning(
-                        "  [%s] %s has no data covering %s; using %s (default continuous) "
-                        "for the longer history (note: the default continuous contract may "
-                        "contain gaps in TradeStation's data)",
-                        symbol, api_symbol, anchor.date(), symbol)
-                    chosen = symbol
-                elif self.config.use_continuous_default_fallback:
-                    logger.warning(
-                        "  [%s] Neither %s nor %s covers %s; using %s",
-                        symbol, api_symbol, symbol, anchor.date(), api_symbol)
-                else:
-                    logger.warning(
-                        "  [%s] %s has no data back to %s; the download will start where "
-                        "%s history begins. Re-run with --use-continuous-default-fallback "
-                        "to use %s for the longer history (note: the default continuous "
-                        "contract may contain gaps in TradeStation's data, e.g. "
-                        "July 18-19, 2024).",
-                        symbol, api_symbol, anchor.date(), api_symbol, symbol)
-            else:
-                logger.info("  [%s] Cannot verify %s history (data starts %s); assuming it covers",
-                            symbol, api_symbol, anchor.date())
-        self._api_symbol_cache[cache_key] = chosen
-        return chosen
-
-    def _has_bars_at(self, symbol: str, probe_time: datetime) -> bool:
-        """Probe whether the API has bars around probe_time for symbol."""
-        url = f"{self.BASE_URL}/marketdata/barcharts/{symbol}"
-        params = {
-            "interval": self.config.interval,
-            "unit": self.config.unit,
-            "barsback": 1,
-            "lastdate": probe_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        }
-        headers = {
-            "Authorization": f"Bearer {self._auth.get_access_token()}",
-            "Content-Type": "application/json",
-        }
-        for attempt in range(2):
-            try:
-                resp = requests.get(url, headers=headers, params=params, timeout=30)
-                if resp.status_code == 401 and attempt == 0:
-                    self._auth.invalidate()
-                    continue
-                if resp.status_code != 200:
-                    return False
-                bars = resp.json().get("Bars") or []
-                if not bars:
-                    return False
-                ts = pd.to_datetime(bars[-1]["TimeStamp"]).replace(tzinfo=None)
-                return ts >= probe_time - timedelta(days=3)
-            except requests.exceptions.RequestException:
-                if attempt == 0:
-                    time.sleep(self.config.rate_limit_delay)
-                    continue
-                return False
-        return False
-
     def _fetch_bars(self, symbol: str, start_date: datetime) -> pd.DataFrame:
         """Fetch all bars for a symbol from start_date to now."""
-        # Pick =11INC or plain @ based on history coverage (cached per symbol)
-        api_symbol = self._resolve_api_symbol(symbol, start_date)
         all_bars = []
         current_end = datetime.now(UTC).replace(tzinfo=None)
         batch_num = 0
 
         while current_end > start_date:
             barsback = self._calc_barsback(start_date, current_end)
-            data = self._api_request(api_symbol, current_end, barsback=barsback)
+            data = self._api_request(symbol, current_end, barsback=barsback)
             if not data or "Bars" not in data or not data["Bars"]:
-                if batch_num == 0 and api_symbol != symbol and self.config.use_continuous_default_fallback:
-                    logger.warning("  [%s] %s returned no data, falling back to %s (default continuous)", symbol, api_symbol, symbol)
-                    api_symbol = symbol
-                    data = self._api_request(api_symbol, current_end, barsback=barsback)
-                    if not data or "Bars" not in data or not data["Bars"]:
-                        break
-                elif batch_num == 0 and api_symbol != symbol:
-                    logger.warning(
-                        "  [%s] %s returned no data. Re-run with --use-continuous-default-fallback "
-                        "to use %s (default continuous) instead.",
-                        symbol, api_symbol, symbol)
-                    break
-                else:
-                    break
+                break
 
             bars = data["Bars"]
             all_bars.extend(bars)
@@ -442,8 +335,6 @@ class TradeStationDownloader:
         logger.info("Compression: %s", self.config.compression.value)
         logger.info("Incremental: %s", incremental)
         logger.info("Parallel workers: %d", self.config.max_workers)
-        logger.info("Continuous default fallback: %s",
-                    "on" if self.config.use_continuous_default_fallback else "off")
         logger.info("#" * 60)
 
     def _log_summary(self) -> None:

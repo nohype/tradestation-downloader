@@ -118,3 +118,19 @@ class TestSymbols:
             "softs", "meats", "currencies", "volatility", "crypto",
         ]
         assert set(DEFAULT_SYMBOLS.keys()) == set(expected_categories)
+
+
+class TestContinuousSuffixRemoved:
+    """The automatic =11INC suffix machinery is removed from models."""
+
+    def test_apply_continuous_suffix_removed(self):
+        """apply_continuous_suffix no longer exists on the models module."""
+        import tradestation.models
+
+        assert not hasattr(tradestation.models, "apply_continuous_suffix")
+
+    def test_continuous_suffix_constant_removed(self):
+        """CONTINUOUS_SUFFIX no longer exists on the models module."""
+        import tradestation.models
+
+        assert not hasattr(tradestation.models, "CONTINUOUS_SUFFIX")

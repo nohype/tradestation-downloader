@@ -62,7 +62,6 @@ class DownloadConfig:
     storage_format: StorageFormat = StorageFormat.SINGLE
     compression: Compression = Compression.ZSTD
     datetime_index: bool = True  # Save with datetime as index (adds _index_1 suffix)
-    use_continuous_default_fallback: bool = False  # Fall back to plain @ when =11INC lacks history
     roll_days: int = 6  # --rollcheck: roll when the front contract expires within this many days
 
     def __post_init__(self):
@@ -84,13 +83,6 @@ def validate_symbol(symbol: str) -> None:
             f"Invalid symbol: {symbol!r}. Symbol contains control or URL/path injection characters."
         )
 
-
-# Custom continuous contract suffix for explicit roll/adjustment control.
-# =11INC: 1st nearest, OI-based roll, 1st instance of higher OI, constant (Panama) adjustment.
-# This avoids data gaps present in the default @ continuous contract (which uses undocumented
-# internal stitching that has known gaps, e.g. July 18, 2024 for @NG/@ES).
-# Applied automatically to all @ symbols; falls back to plain @ if the API doesn't support it.
-CONTINUOUS_SUFFIX = "=11INC"
 
 # Default US Futures symbols organized by category
 DEFAULT_SYMBOLS = {
@@ -178,17 +170,6 @@ DEFAULT_SYMBOLS = {
         "@MET",   # CME Micro Ether Futures
     ],
 }
-
-
-def apply_continuous_suffix(symbol: str) -> str:
-    """Apply custom continuous contract suffix to a symbol if applicable.
-
-    Appends CONTINUOUS_SUFFIX (=11INC) to @ continuous contract symbols,
-    unless the user already specified custom parameters (contains '=').
-    """
-    if not symbol.startswith("@") or "=" in symbol:
-        return symbol
-    return symbol + CONTINUOUS_SUFFIX
 
 
 def get_all_symbols() -> list[str]:

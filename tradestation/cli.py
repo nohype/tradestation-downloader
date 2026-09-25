@@ -138,19 +138,6 @@ Examples:
         metavar="N",
         help="Number of parallel download workers (default: 4, use 1 for sequential)",
     )
-    parser.add_argument(
-        "--use-continuous-default-fallback",
-        action="store_true",
-        help=(
-            "When the custom continuous contract (=11INC) has no data far enough back "
-            "to cover the requested start date (e.g. @RTY before July 2017, when CME "
-            "re-listed the E-mini Russell 2000), fall back to TradeStation's default "
-            "continuous contract (plain @ symbol) to get the longer history. "
-            "WARNING: the default continuous contract has known gaps in TradeStation's "
-            "data (e.g. July 18-19, 2024) that the =11INC contract avoids. "
-            "Only enable this if you need the longer history and accept those gaps."
-        ),
-    )
 
     return parser
 
@@ -250,9 +237,6 @@ def run_download(args: argparse.Namespace) -> int:
     # Override workers if provided
     if args.workers:
         config.max_workers = args.workers
-
-    # Enable fallback to default continuous contract when =11INC lacks history
-    config.use_continuous_default_fallback = args.use_continuous_default_fallback
 
     # Run downloader
     try:

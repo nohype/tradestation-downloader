@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 import pandas as pd
 import pytest
 
+import tradestation.metadata
 from tradestation.auth import TradeStationAuth
 from tradestation.metadata import (
     convert_df_timezone,
@@ -16,7 +17,6 @@ from tradestation.metadata import (
     fetch_quote_snapshots,
     fetch_symbol_details,
     get_exchange_timezone,
-    resolve_api_symbols,
     run_metadata,
 )
 
@@ -429,107 +429,62 @@ class TestFetchQuoteSnapshots:
         assert mock_get.call_count == 1
 
 
-class TestResolveApiSymbols:
-    """Tests for resolve_api_symbols (plain-first, =11INC fallback)."""
+class TestSymbolResolutionRemoved:
+    """The plain-vs-suffixed API resolution probing is removed from metadata."""
 
-    @pytest.fixture
-    def auth(self):
-        """Pre-warmed TradeStationAuth instance to avoid network calls."""
-        auth = TradeStationAuth("client_id", "client_secret", "refresh_token")
-        auth._access_token = "test_token"
-        auth._token_expiry = datetime.now() + timedelta(hours=1)
-        return auth
+    def test_resolve_api_symbols_removed(self):
+        """resolve_api_symbols no longer exists on the metadata module."""
+        assert not hasattr(tradestation.metadata, "resolve_api_symbols")
 
-    def _mock_response(self, payload, status_code=200):
-        resp = Mock()
-        resp.status_code = status_code
-        resp.text = "error"
-        resp.json.return_value = payload
-        return resp
+    def test_which_symbols_resolve_removed(self):
+        """_which_symbols_resolve no longer exists on the metadata module."""
+        assert not hasattr(tradestation.metadata, "_which_symbols_resolve")
 
-    def test_plain_preferred_when_it_resolves(self, auth):
-        """@ES resolves in plain form; the suffixed form is not needed."""
+
+class TestRunMetadataSymbolAsIs:
+    """run_metadata fetches details/quotes for stored symbols exactly as stored."""
+
+    def test_details_and_quotes_requested_with_stored_symbol(self, temp_data_dir, capsys):
+        """Stored '@PA' is queried as '@PA', never rewritten to '@PA=11INC'."""
+        TestRunMetadata._save_symbol(temp_data_dir, "@PA")
+        config = TestRunMetadata._make_config(temp_data_dir)
+
+        details = [{"Symbol": "@PA", "Name": "Palladium", "Exchange": "NYMEX"}]
+        quotes = [{"Symbol": "@PA", "Last": 1000.0}]
+        auth = Mock()
+        auth.get_access_token.return_value = "test_token"
+
         with (
-            patch("tradestation.metadata.requests.get") as mock_get,
+            patch("tradestation.metadata.load_config", return_value=config),
+            patch("tradestation.metadata.TradeStationAuth", return_value=auth),
+            patch("tradestation.metadata.datetime", _FixedDateTime),
+            patch(
+                "tradestation.metadata.requests.get",
+                side_effect=[
+                    TestRunMetadata._mock_response(
+                        {"Symbols": [], "Errors": [{"Symbol": "@PA", "Error": "NotFound"}]}
+                    ),
+                    TestRunMetadata._mock_response({"Symbols": [{"Symbol": "@PA=11INC"}]}),
+                ],
+            ),
             patch("tradestation.metadata.time.sleep"),
+            patch(
+                "tradestation.metadata.fetch_symbol_details", return_value=details
+            ) as mock_details,
+            patch(
+                "tradestation.metadata.fetch_quote_snapshots", return_value=quotes
+            ) as mock_quotes,
         ):
-            mock_get.side_effect = [
-                self._mock_response({"Symbols": [{"Symbol": "@ES"}]}),
-                self._mock_response({"Symbols": [{"Symbol": "@ES=11INC"}]}),
-            ]
-            mapping = resolve_api_symbols(auth, ["@ES"])
+            result = run_metadata(str(temp_data_dir / "config.yaml"))
 
-        assert mapping == {"@ES": "@ES"}
-        assert mock_get.call_count == 2
+        assert result == 0
+        assert mock_details.call_args[0][1] == ["@PA"]
+        assert mock_quotes.call_args[0][1] == ["@PA"]
 
-    def test_falls_back_to_suffixed_when_plain_invalid(self, auth):
-        """Plain @PA is not resolvable on the API; @PA=11INC is used instead."""
-        with (
-            patch("tradestation.metadata.requests.get") as mock_get,
-            patch("tradestation.metadata.time.sleep"),
-        ):
-            mock_get.side_effect = [
-                self._mock_response(
-                    {"Symbols": [], "Errors": [{"Symbol": "@PA", "Error": "NotFound"}]}
-                ),
-                self._mock_response({"Symbols": [{"Symbol": "@PA=11INC"}]}),
-            ]
-            mapping = resolve_api_symbols(auth, ["@PA"])
-
-        assert mapping == {"@PA": "@PA=11INC"}
-        assert mock_get.call_count == 2
-
-    def test_keeps_plain_when_suffixed_invalid(self, auth):
-        """ICE symbols like @KC resolve plain but not with the =11INC suffix."""
-        with (
-            patch("tradestation.metadata.requests.get") as mock_get,
-            patch("tradestation.metadata.time.sleep"),
-        ):
-            mock_get.side_effect = [
-                self._mock_response({"Symbols": [{"Symbol": "@KC"}]}),
-                self._mock_response(
-                    {"Symbols": [], "Errors": [{"Symbol": "@KC=11INC", "Error": "NotFound"}]}
-                ),
-            ]
-            mapping = resolve_api_symbols(auth, ["@KC"])
-
-        assert mapping == {"@KC": "@KC"}
-        assert mock_get.call_count == 2
-
-    def test_mixed_symbols_resolve_per_symbol(self, auth):
-        """One batch probe for plain forms and one for suffixed forms."""
-        with (
-            patch("tradestation.metadata.requests.get") as mock_get,
-            patch("tradestation.metadata.time.sleep"),
-        ):
-            mock_get.side_effect = [
-                self._mock_response({"Symbols": [{"Symbol": "@ES"}, {"Symbol": "@KC"}]}),
-                self._mock_response({"Symbols": [{"Symbol": "@PA=11INC"}]}),
-            ]
-            mapping = resolve_api_symbols(auth, ["@ES", "@KC", "@PA"])
-
-        assert mapping == {"@ES": "@ES", "@KC": "@KC", "@PA": "@PA=11INC"}
-        assert mock_get.call_count == 2
-
-    def test_plain_probes_are_batched_by_50(self, auth):
-        """60 symbols without @ prefix need only the plain-form probe (2 batches)."""
-        symbols = [f"S{i}" for i in range(60)]
-        first_payload = {"Symbols": [{"Symbol": s} for s in symbols[:50]]}
-        second_payload = {"Symbols": [{"Symbol": s} for s in symbols[50:]]}
-
-        with (
-            patch("tradestation.metadata.requests.get") as mock_get,
-            patch("tradestation.metadata.time.sleep") as mock_sleep,
-        ):
-            mock_get.side_effect = [
-                self._mock_response(first_payload),
-                self._mock_response(second_payload),
-            ]
-            mapping = resolve_api_symbols(auth, symbols)
-
-        assert mapping == {s: s for s in symbols}
-        assert mock_get.call_count == 2
-        assert mock_sleep.call_count == 1
+        output = json.loads(capsys.readouterr().out)
+        sym = output["symbols"]["@PA"]
+        assert sym["api"] == details[0]
+        assert sym["quote"] == quotes[0]
 
 
 class TestGetFirstTimestamp:
@@ -650,8 +605,11 @@ class TestRunMetadata:
 
         details = {"Symbols": [{"Symbol": "@ES", "Name": "E-mini S&P", "Exchange": "CME"}]}
         quotes = {"Quotes": [{"Symbol": "@ES", "Last": 4500.0, "Bid": 4499.5, "Ask": 4500.5}]}
-        details_resp = self._mock_response(details)
-        quotes_resp = self._mock_response(quotes)
+
+        def fake_get(url, **_kwargs):
+            if "/marketdata/quotes/" in url:
+                return self._mock_response(quotes)
+            return self._mock_response(details)
 
         auth = Mock()
         auth.get_access_token.return_value = "test_token"
@@ -660,10 +618,7 @@ class TestRunMetadata:
             patch("tradestation.metadata.load_config", return_value=config),
             patch("tradestation.metadata.TradeStationAuth", return_value=auth),
             patch("tradestation.metadata.datetime", _FixedDateTime),
-            patch("tradestation.metadata.resolve_api_symbols", return_value={"@ES": "@ES"}),
-            patch(
-                "tradestation.metadata.requests.get", side_effect=[details_resp, quotes_resp]
-            ) as mock_get,
+            patch("tradestation.metadata.requests.get", side_effect=fake_get),
             patch("tradestation.metadata.time.sleep"),
         ):
             result = run_metadata(str(temp_data_dir / "config.yaml"))
@@ -707,7 +662,6 @@ class TestRunMetadata:
             assert a["duration_hours"] == b["duration_hours"]
 
         assert output["timezone"] == "UTC"
-        assert mock_get.call_count == 2
 
         metadata_path = temp_data_dir / "metadata.json"
         assert metadata_path.exists()
@@ -736,8 +690,7 @@ class TestRunMetadata:
         with (
             patch("tradestation.metadata.load_config", return_value=config),
             patch("tradestation.metadata.TradeStationAuth", return_value=auth),
-            patch("tradestation.metadata.resolve_api_symbols", return_value={"@ES": "@ES"}),
-            patch("tradestation.metadata.requests.get", return_value=error_resp) as mock_get,
+            patch("tradestation.metadata.requests.get", return_value=error_resp),
             patch("tradestation.metadata.time.sleep"),
         ):
             result = run_metadata(str(temp_data_dir / "config.yaml"))
@@ -757,8 +710,6 @@ class TestRunMetadata:
         assert dd["total_bars"] == 6
         assert "Monday" in dd["session_times"]
 
-        assert mock_get.call_count == 2
-
     def test_run_metadata_dst_spanning_mirror(self, temp_data_dir, capsys):
         """Bug 1: sessions and sessions_utc are mirror images for DST-spanning data.
 
@@ -771,8 +722,11 @@ class TestRunMetadata:
 
         details = {"Symbols": [{"Symbol": "@ES", "Name": "E-mini S&P", "Exchange": "CME"}]}
         quotes = {"Quotes": [{"Symbol": "@ES", "Last": 4500.0}]}
-        details_resp = self._mock_response(details)
-        quotes_resp = self._mock_response(quotes)
+
+        def fake_get(url, **_kwargs):
+            if "/marketdata/quotes/" in url:
+                return self._mock_response(quotes)
+            return self._mock_response(details)
 
         auth = Mock()
         auth.get_access_token.return_value = "test_token"
@@ -781,10 +735,7 @@ class TestRunMetadata:
             patch("tradestation.metadata.load_config", return_value=config),
             patch("tradestation.metadata.TradeStationAuth", return_value=auth),
             patch("tradestation.metadata.datetime", _FixedDateTime),
-            patch("tradestation.metadata.resolve_api_symbols", return_value={"@ES": "@ES"}),
-            patch(
-                "tradestation.metadata.requests.get", side_effect=[details_resp, quotes_resp]
-            ) as mock_get,
+            patch("tradestation.metadata.requests.get", side_effect=fake_get),
             patch("tradestation.metadata.time.sleep"),
         ):
             result = run_metadata(str(temp_data_dir / "config.yaml"))
@@ -815,7 +766,6 @@ class TestRunMetadata:
             assert a["duration_hours"] == b["duration_hours"]
 
         assert output["timezone"] == "UTC"
-        assert mock_get.call_count == 2
 
     def test_run_metadata_warns_on_unmapped_ice_exchange(self, temp_data_dir, caplog):
         """Unmapped ICE-family exchange strings emit a loud ERROR and keep tz/sessions null."""
@@ -833,7 +783,10 @@ class TestRunMetadata:
         with (
             patch("tradestation.metadata.load_config", return_value=config),
             patch("tradestation.metadata.TradeStationAuth", return_value=auth),
-            patch("tradestation.metadata.resolve_api_symbols", return_value={symbol: symbol}),
+            patch(
+                "tradestation.metadata.requests.get",
+                return_value=self._mock_response({"Symbols": [{"Symbol": symbol}]}),
+            ),
             patch("tradestation.metadata.fetch_symbol_details", return_value=details),
             patch("tradestation.metadata.fetch_quote_snapshots", return_value=quotes),
             patch("tradestation.metadata.datetime", _FixedDateTime),
@@ -870,7 +823,10 @@ class TestRunMetadata:
         with (
             patch("tradestation.metadata.load_config", return_value=config),
             patch("tradestation.metadata.TradeStationAuth", return_value=auth),
-            patch("tradestation.metadata.resolve_api_symbols", return_value={symbol: symbol}),
+            patch(
+                "tradestation.metadata.requests.get",
+                return_value=self._mock_response({"Symbols": [{"Symbol": symbol}]}),
+            ),
             patch("tradestation.metadata.fetch_symbol_details", return_value=details),
             patch("tradestation.metadata.fetch_quote_snapshots", return_value=quotes),
             patch("tradestation.metadata.datetime", _FixedDateTime),
@@ -1041,8 +997,11 @@ class TestDeriveSessions:
         config = TestRunMetadata._make_config(temp_data_dir)
         details = {"Symbols": [{"Symbol": "@ES", "Name": "E-mini S&P", "Exchange": "CME"}]}
         quotes = {"Quotes": [{"Symbol": "@ES", "Last": 4500.0, "Bid": 4499.5, "Ask": 4500.5}]}
-        details_resp = TestRunMetadata._mock_response(details)
-        quotes_resp = TestRunMetadata._mock_response(quotes)
+
+        def fake_get(url, **_kwargs):
+            if "/marketdata/quotes/" in url:
+                return TestRunMetadata._mock_response(quotes)
+            return TestRunMetadata._mock_response(details)
 
         auth = Mock()
         auth.get_access_token.return_value = "test_token"
@@ -1051,10 +1010,7 @@ class TestDeriveSessions:
             patch("tradestation.metadata.load_config", return_value=config),
             patch("tradestation.metadata.TradeStationAuth", return_value=auth),
             patch("tradestation.metadata.datetime", _FixedDateTime),
-            patch("tradestation.metadata.resolve_api_symbols", return_value={"@ES": "@ES"}),
-            patch(
-                "tradestation.metadata.requests.get", side_effect=[details_resp, quotes_resp]
-            ) as mock_get,
+            patch("tradestation.metadata.requests.get", side_effect=fake_get),
             patch("tradestation.metadata.time.sleep"),
         ):
             result = run_metadata(str(temp_data_dir / "config.yaml"))
@@ -1082,7 +1038,6 @@ class TestDeriveSessions:
             assert a["spans_midnight"] == b["spans_midnight"]
             assert a["duration_hours"] == b["duration_hours"]
         assert output["timezone"] == "UTC"
-        assert mock_get.call_count == 2
 
 
 class TestGetExchangeTimezone:

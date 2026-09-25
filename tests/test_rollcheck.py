@@ -533,7 +533,6 @@ class TestCliDispatch:
             "no_datetime_index": False,
             "workers": 4,
             "verbose": False,
-            "use_continuous_default_fallback": False,
         }
         defaults.update(overrides)
         return argparse.Namespace(**defaults)

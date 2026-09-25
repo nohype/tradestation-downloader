@@ -4,9 +4,9 @@ import pandas as pd
 
 from tradestation.models import StorageFormat
 from tradestation.storage import (
-    SingleFileStorage,
     DailyPartitionedStorage,
     MonthlyPartitionedStorage,
+    SingleFileStorage,
     create_storage,
     detect_storage_format,
 )
