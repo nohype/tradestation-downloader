@@ -63,6 +63,7 @@ class DownloadConfig:
     compression: Compression = Compression.ZSTD
     datetime_index: bool = True  # Save with datetime as index (adds _index_1 suffix)
     use_continuous_default_fallback: bool = False  # Fall back to plain @ when =11INC lacks history
+    roll_days: int = 6  # --rollcheck: roll when the front contract expires within this many days
 
     def __post_init__(self):
         """Validate and convert fields after initialization."""

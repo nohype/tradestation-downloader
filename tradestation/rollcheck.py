@@ -19,6 +19,9 @@ BASE_URL_V2 = "https://api.tradestation.com/v2"
 
 NA = "n/a"
 
+# Default for --roll-days: roll when the front contract expires this soon.
+DEFAULT_ROLL_DAYS = 6
+
 
 class RollcheckError(Exception):
     """Raised when a roll-check API call fails."""
@@ -39,6 +42,9 @@ class RollcheckRow:
     warning: bool = False
     warnings: list[str] = field(default_factory=list)
     day: date | None = None
+    current_expiry: date | None = None
+    next_expiry: date | None = None
+    days_to_expiry: int | None = None
 
 
 def _api_get(auth: TradeStationAuth, url: str, params: dict | None = None):
@@ -172,7 +178,12 @@ def bar_for_day(bars: list[dict], timestamp: datetime) -> dict | None:
     return None
 
 
-def check_symbol(auth: TradeStationAuth, symbol: str, root: str) -> RollcheckRow:
+def check_symbol(
+    auth: TradeStationAuth,
+    symbol: str,
+    root: str,
+    roll_days: int = DEFAULT_ROLL_DAYS,
+) -> RollcheckRow:
     """Run the roll check for one symbol."""
     row = RollcheckRow(symbol=symbol)
     try:
@@ -193,6 +204,11 @@ def check_symbol(auth: TradeStationAuth, symbol: str, root: str) -> RollcheckRow
         return row
 
     row.current, row.next = chain[0][0], chain[1][0]
+    row.current_expiry = chain[0][1].date()
+    row.next_expiry = chain[1][1].date()
+    row.days_to_expiry = (row.current_expiry - date.today()).days
+    if row.days_to_expiry <= roll_days:
+        row.rollover = "YES"
 
     try:
         current_bars = fetch_daily_bars(auth, row.current)
@@ -295,7 +311,7 @@ def run_rollcheck(config: DownloadConfig) -> int:
     rows = []
     for i, symbol in enumerate(symbols):
         try:
-            rows.append(check_symbol(auth, symbol, roots[symbol]))
+            rows.append(check_symbol(auth, symbol, roots[symbol], config.roll_days))
         except Exception as e:
             logger.error("Roll check failed for %s: %s", symbol, e)
             row = RollcheckRow(symbol=symbol, warning=True)

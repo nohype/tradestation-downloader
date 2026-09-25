@@ -1,7 +1,7 @@
 """Tests for the --rollcheck feature."""
 
 import argparse
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from unittest.mock import Mock, patch
 
 from tradestation.cli import create_download_parser, run_download
@@ -99,10 +99,13 @@ def _token_post(*_args, **_kwargs):
 def _expiry(days_ahead):
     """An expiration date N days in the future, in the ASP.NET /Date(ms)/ format
     returned by the v2 symbol-search endpoint."""
-    from datetime import UTC, datetime
-
     dt = datetime.combine(date.today() + timedelta(days=days_ahead), datetime.min.time(), UTC)
     return f"/Date({int(dt.timestamp() * 1000)})/"
+
+
+def _dt(days_ahead):
+    """A UTC datetime N days in the future, as returned by fetch_contract_chain."""
+    return datetime.combine(date.today() + timedelta(days=days_ahead), datetime.min.time(), UTC)
 
 
 def _expiry_iso(days_ahead):
@@ -269,6 +272,72 @@ class TestRolloverCriterion:
         assert _fmt_ratio(0, 0) == "n/a"
 
 
+class TestExpiryTrigger:
+    """Roll triggered by days-to-expiry (--roll-days, default 6)."""
+
+    def _run_es(self, capsys, expiry_days, cur_oi, cur_vol, next_oi, next_vol, roll_days=None):
+        chain = [
+            _contract("ESZ25", _expiry(expiry_days)),
+            _contract("ESH26", _expiry(120)),
+        ]
+        bars = {
+            "ESZ25": [_bar("2025-12-05T00:00:00Z", cur_vol, cur_oi)],
+            "ESH26": [_bar("2025-12-05T00:00:00Z", next_vol, next_oi)],
+        }
+        config = _make_config() if roll_days is None else _make_config(roll_days=roll_days)
+        return _run(capsys, chains={"ES": chain}, bars=bars, config=config)
+
+    def test_triggers_at_default_threshold(self, capsys):
+        # 6 days to expiry, lower next OI and Vol: expiry alone forces the roll
+        code, out = self._run_es(capsys, 6, 5000, 9000, 1000, 100)
+        assert code == 0
+        assert "YES" in out
+
+    def test_no_trigger_beyond_default_threshold(self, capsys):
+        code, out = self._run_es(capsys, 7, 5000, 9000, 1000, 100)
+        assert "no" in out
+        assert "YES" not in out
+
+    def test_custom_threshold(self, capsys):
+        code, out = self._run_es(capsys, 10, 5000, 9000, 1000, 100, roll_days=10)
+        assert "YES" in out
+
+    def test_custom_threshold_not_reached(self, capsys):
+        _, out = self._run_es(capsys, 10, 5000, 9000, 1000, 100, roll_days=9)
+        assert "YES" not in out
+
+    def test_triggers_even_when_next_bar_missing(self, capsys):
+        # The expiry safety net must fire even when next-contract data is unavailable
+        chain = [
+            _contract("ESZ25", _expiry(5)),
+            _contract("ESH26", _expiry(120)),
+        ]
+        bars = {
+            "ESZ25": [_bar("2025-12-05T00:00:00Z", 5000, 1000)],
+            "ESH26": [],
+        }
+        code, out = _run(capsys, chains={"ES": chain}, bars=bars)
+        assert code == 0
+        assert "YES" in out
+
+    def test_check_symbol_sets_expiry_fields(self):
+        chain = [
+            ("ESZ25", _dt(6)),
+            ("ESH26", _dt(120)),
+        ]
+        with (
+            patch("tradestation.rollcheck.fetch_contract_chain", return_value=chain),
+            patch(
+                "tradestation.rollcheck.fetch_daily_bars",
+                return_value=[_bar("2025-12-05T00:00:00Z", 100, 10)],
+            ),
+        ):
+            row = check_symbol(Mock(), "@ES", "ES")
+        assert row.current_expiry == date.today() + timedelta(days=6)
+        assert row.days_to_expiry == 6
+        assert row.rollover == "YES"
+
+
 class TestMissingAndErrorData:
     """Missing data and error handling."""
 
@@ -379,6 +448,7 @@ class TestCliDispatch:
             "export_csv": False,
             "export_ts_csv": False,
             "rollcheck": False,
+            "roll_days": 6,
             "symbols": None,
             "category": None,
             "all_categories": False,
@@ -397,6 +467,11 @@ class TestCliDispatch:
         args = create_download_parser().parse_args(["--rollcheck"])
         assert args.rollcheck is True
 
+    def test_roll_days_default_and_override(self):
+        parser = create_download_parser()
+        assert parser.parse_args(["--rollcheck"]).roll_days == 6
+        assert parser.parse_args(["--rollcheck", "--roll-days", "10"]).roll_days == 10
+
     def test_rollcheck_dispatches_and_exits(self):
         config = _make_config(symbols=["@ES"])
         args = self._args(rollcheck=True)
@@ -407,8 +482,21 @@ class TestCliDispatch:
         ):
             result = run_download(args)
         assert result == 0
+        assert config.roll_days == 6
         mock_rc.assert_called_once_with(config)
         mock_dl.assert_not_called()
+
+    def test_rollcheck_passes_roll_days_override(self):
+        config = _make_config(symbols=["@ES"])
+        args = self._args(rollcheck=True, roll_days=12)
+        with (
+            patch("tradestation.cli.load_config", return_value=config),
+            patch("tradestation.rollcheck.run_rollcheck", return_value=0) as mock_rc,
+        ):
+            result = run_download(args)
+        assert result == 0
+        assert config.roll_days == 12
+        mock_rc.assert_called_once_with(config)
 
     def test_rollcheck_uses_symbol_overrides(self):
         config = _make_config(symbols=[])
@@ -435,7 +523,7 @@ class TestCheckSymbol:
         with (
             patch(
                 "tradestation.rollcheck.fetch_contract_chain",
-                return_value=[("ESZ25", Mock()), ("ESH26", Mock())],
+                return_value=[("ESZ25", _dt(30)), ("ESH26", _dt(120))],
             ),
             patch(
                 "tradestation.rollcheck.fetch_daily_bars",

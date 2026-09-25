@@ -125,6 +125,13 @@ Examples:
         help="Check whether to roll each symbol's front contract to the next, then exit",
     )
     parser.add_argument(
+        "--roll-days",
+        type=int,
+        default=6,
+        metavar="N",
+        help="With --rollcheck: also roll when the current contract expires within N days (default: 6)",
+    )
+    parser.add_argument(
         "-w", "--workers",
         type=int,
         default=4,
@@ -225,6 +232,7 @@ def run_download(args: argparse.Namespace) -> int:
 
     if args.rollcheck:
         from .rollcheck import run_rollcheck
+        config.roll_days = args.roll_days
         return run_rollcheck(config)
 
     # Override storage format if provided

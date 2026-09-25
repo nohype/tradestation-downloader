@@ -23,6 +23,7 @@ def _make_args(**overrides):
         "export_csv": False,
         "export_ts_csv": False,
         "rollcheck": False,
+        "roll_days": 6,
         "symbols": None,
         "category": None,
         "all_categories": False,

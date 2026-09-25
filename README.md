@@ -91,6 +91,9 @@ tradestation-download -w 1
 
 # Check whether each symbol's front contract should roll to the next
 tradestation-download --rollcheck
+
+# Roll check with a custom days-to-expiry trigger (default: 6)
+tradestation-download --rollcheck --roll-days 10
 ```
 
 > **Note:** On Windows, the `@` symbol has special meaning in CMD/PowerShell.
