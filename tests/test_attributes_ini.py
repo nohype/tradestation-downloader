@@ -7,11 +7,12 @@ import json
 import re
 import shutil
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pandas as pd
 import pytest
 
+from tradestation import attributes_ini
 from tradestation.models import DownloadConfig
 from tradestation.storage import SingleFileStorage
 
@@ -68,6 +69,27 @@ def _write_metadata(data_dir, symbols):
         "symbols": entries,
     }
     (Path(data_dir) / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+
+def _metadata_dict(symbols):
+    """Build an in-memory metadata dict; symbols maps stored symbol -> (api, timezone).
+
+    Same shape as _write_metadata's file contents, for unit-testing the pure
+    lookup functions without touching disk.
+    """
+    return {
+        "generated_at": "2024-01-01T00:00:00Z",
+        "data_dir": "/data",
+        "timezone": "UTC",
+        "symbols": {
+            symbol: {
+                "symbol": symbol,
+                "api": api,
+                "downloaded_data": {"exchange_timezone": timezone},
+            }
+            for symbol, (api, timezone) in symbols.items()
+        },
+    }
 
 
 def _save(data_dir, symbol, df):
@@ -428,3 +450,138 @@ class TestAttributesIni:
         assert row["CATEGORY"] == "FUTURE"
         assert row["DATE FORMAT"] == "MM/DD/YYYY"
         assert row["EXCHANGE"] == "CME"
+
+
+class TestFindMetadataEntry:
+    """find_metadata_entry: exact key first, then same-base-symbol fallback."""
+
+    def test_exact_sufficient_entry_returned(self):
+        """The entry keyed by the exact requested symbol is returned as-is."""
+        metadata = _metadata_dict({"@ES": (_api(Description="ES exact"), "UTC")})
+        entry = attributes_ini.find_metadata_entry(metadata, "@ES")
+        assert entry is not None
+        assert entry["api"]["Description"] == "ES exact"
+
+    def test_same_base_continuous_variation_fallback(self):
+        """@MNG=11ORC is satisfied by a sufficient @MNG=11INC entry."""
+        metadata = _metadata_dict({"@MNG=11INC": (_api(Description="INC variant"), "UTC")})
+        entry = attributes_ini.find_metadata_entry(metadata, "@MNG=11ORC")
+        assert entry is not None
+        assert entry["api"]["Description"] == "INC variant"
+
+    def test_same_base_contract_month_variation_fallback(self):
+        """@MNGV26 (contract-month form) is satisfied by a sufficient @MNG entry."""
+        metadata = _metadata_dict({"@MNG": (_api(Description="plain MNG"), "UTC")})
+        entry = attributes_ini.find_metadata_entry(metadata, "@MNGV26")
+        assert entry is not None
+        assert entry["api"]["Description"] == "plain MNG"
+
+    def test_different_base_symbol_does_not_match(self):
+        """A different base symbol never matches, even with an @ prefix."""
+        metadata = _metadata_dict({"@ES": (_api(), "UTC")})
+        assert attributes_ini.find_metadata_entry(metadata, "@MNG=11ORC") is None
+
+    def test_insufficient_same_base_entry_does_not_count(self):
+        """A same-base entry missing PriceFormat must not satisfy the lookup."""
+        api_no_pf = {k: v for k, v in _api().items() if k != "PriceFormat"}
+        metadata = _metadata_dict({"@MNG=11INC": (api_no_pf, "UTC")})
+        assert attributes_ini.find_metadata_entry(metadata, "@MNG=11ORC") is None
+
+    def test_exact_key_insufficient_falls_back_to_variation(self):
+        """An insufficient exact entry is skipped; a sufficient variation is used."""
+        api_no_pf = {k: v for k, v in _api().items() if k != "PriceFormat"}
+        metadata = _metadata_dict(
+            {
+                "@MNG=11ORC": (api_no_pf, "UTC"),  # exact key, but insufficient
+                "@MNG=11INC": (_api(Description="INC variant"), "UTC"),
+            }
+        )
+        entry = attributes_ini.find_metadata_entry(metadata, "@MNG=11ORC")
+        assert entry is not None
+        assert entry["api"]["Description"] == "INC variant"
+
+    def test_multiple_sufficient_variations_pick_sorted_first_key(self):
+        """Deterministic: the sorted-first same-base key wins, not insertion order."""
+        metadata = _metadata_dict(
+            {
+                # Inserted first, but "@MNG=11INC" sorts before "@MNG=11ORC".
+                "@MNG=11ORC": (_api(Description="ORC variant"), "UTC"),
+                "@MNG=11INC": (_api(Description="INC variant"), "UTC"),
+            }
+        )
+        entry = attributes_ini.find_metadata_entry(metadata, "@MNG=106XC")
+        assert entry is not None
+        assert entry["symbol"] == "@MNG=11INC"
+        assert entry["api"]["Description"] == "INC variant"
+
+    def test_exact_entry_preferred_over_variation(self):
+        """When both the exact key and a variation exist, the exact entry wins."""
+        metadata = _metadata_dict(
+            {
+                "@MNG=11INC": (_api(Description="INC variant"), "UTC"),
+                "@MNG=11ORC": (_api(Description="ORC exact"), "UTC"),
+            }
+        )
+        entry = attributes_ini.find_metadata_entry(metadata, "@MNG=11ORC")
+        assert entry is not None
+        assert entry["api"]["Description"] == "ORC exact"
+
+    def test_none_metadata_returns_none(self):
+        """A None metadata (missing/unreadable file) yields no entry."""
+        assert attributes_ini.find_metadata_entry(None, "@ES") is None
+
+
+class TestMetadataSufficientFallback:
+    """metadata_sufficient is fallback-aware."""
+
+    def test_same_base_variation_satisfies_request(self):
+        """A sufficient same-base variation entry makes the request sufficient."""
+        metadata = _metadata_dict({"@MNG=11INC": (_api(), "UTC")})
+        assert attributes_ini.metadata_sufficient(metadata, ["@MNG=11ORC"]) is True
+
+    def test_no_base_match_is_not_sufficient(self):
+        """No same-base entry anywhere: find_metadata_entry is None and
+        metadata_sufficient is False."""
+        metadata = _metadata_dict({"@ES": (_api(), "UTC")})
+        assert attributes_ini.find_metadata_entry(metadata, "@MNG=11ORC") is None
+        assert attributes_ini.metadata_sufficient(metadata, ["@MNG=11ORC"]) is False
+
+
+class TestEnsureMetadataFallback:
+    """ensure_metadata regenerates only when no sufficient entry exists."""
+
+    def test_no_regeneration_when_same_base_variation_sufficient(self, temp_data_dir):
+        """Only a same-base variation entry exists: run_metadata must NOT be called."""
+        _write_metadata(temp_data_dir, {"@MNG=11INC": (_api(Description="INC variant"), "UTC")})
+
+        mock_run = Mock(side_effect=AssertionError("run_metadata must not be called"))
+        with patch("tradestation.metadata.run_metadata", mock_run):
+            metadata = attributes_ini.ensure_metadata(
+                "config.yaml", temp_data_dir, ["@MNG=11ORC"]
+            )
+
+        mock_run.assert_not_called()
+        assert metadata is not None
+        assert metadata["symbols"]["@MNG=11INC"]["api"]["Description"] == "INC variant"
+
+    def test_post_regen_check_is_fallback_aware(self, temp_data_dir):
+        """No same-base entry at first: run_metadata IS called, and the
+        post-regeneration check accepts a variation written by regeneration."""
+        _write_metadata(temp_data_dir, {"@ES": (_api(), "UTC")})
+
+        def fake_run_metadata(_config_path):
+            _write_metadata(
+                temp_data_dir, {"@MNG=11INC": (_api(Description="INC variant"), "UTC")}
+            )
+            return 0
+
+        with patch(
+            "tradestation.metadata.run_metadata", side_effect=fake_run_metadata
+        ) as mock_run:
+            metadata = attributes_ini.ensure_metadata(
+                "config.yaml", temp_data_dir, ["@MNG=11ORC"]
+            )
+
+        mock_run.assert_called_once()
+        assert metadata is not None
+        assert metadata["symbols"]["@MNG=11INC"]["api"]["Description"] == "INC variant"

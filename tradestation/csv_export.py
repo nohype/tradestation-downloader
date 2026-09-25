@@ -212,7 +212,7 @@ def run_export_ts_csv(config_path: str, symbols: list[str] | None = None) -> int
             logger.warning("No data for %s; skipping", symbol)
             continue
 
-        entry = (metadata.get("symbols") or {}).get(symbol) or {}
+        entry = attributes_ini.find_metadata_entry(metadata, symbol) or {}
         api = entry.get("api") if isinstance(entry.get("api"), dict) else None
         timezone = attributes_ini.entry_timezone(entry)
         if api is None or timezone is None:

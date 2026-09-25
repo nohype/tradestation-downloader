@@ -2,6 +2,7 @@
 Data models and configuration for TradeStation downloader.
 """
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -82,6 +83,16 @@ def validate_symbol(symbol: str) -> None:
         raise ValueError(
             f"Invalid symbol: {symbol!r}. Symbol contains control or URL/path injection characters."
         )
+
+
+def base_symbol(symbol: str) -> str:
+    """Reduce a symbol to the root shared by its variations.
+
+    Strips the optional leading '@', everything from '=' on, and a trailing
+    futures month code + 1-2 digit year ('@MNG=11ORC' -> 'MNG', 'ESZ25' -> 'ES').
+    """
+    base = symbol.lstrip("@").split("=", 1)[0]
+    return re.sub(r"[FGHJKMNQUVXZ]\d{1,2}$", "", base)
 
 
 # Default US Futures symbols organized by category

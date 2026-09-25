@@ -2,6 +2,7 @@
 
 import pytest
 
+import tradestation.models
 from tradestation.models import (
     DEFAULT_SYMBOLS,
     DownloadConfig,
@@ -134,3 +135,38 @@ class TestContinuousSuffixRemoved:
         import tradestation.models
 
         assert not hasattr(tradestation.models, "CONTINUOUS_SUFFIX")
+
+
+class TestBaseSymbol:
+    """base_symbol reduces a stored symbol to the root shared by its variations.
+
+    Used by the TS CSV export metadata fallback: @MNG=11ORC, @MNG=106XC and
+    @MNGV26 are all variations of the same underlying symbol MNG, so any
+    sufficient metadata entry for one can serve the others.
+    """
+
+    @pytest.mark.parametrize(
+        ("symbol", "expected"),
+        [
+            ("@MNG=11ORC", "MNG"),  # continuous spec variation
+            ("@MNG=106XC", "MNG"),  # other continuous spec variation
+            ("@MNGV26", "MNG"),  # contract-month form (V26 = Oct 2026)
+            ("@MNG", "MNG"),  # plain @-prefixed root
+            ("ESZ25", "ES"),  # unprefixed contract (Z25 = Dec 2025)
+            ("@ES", "ES"),
+            ("@6EZ26", "6E"),  # currency root keeps its leading digit
+            ("@CL", "CL"),
+            ("MNG", "MNG"),  # already a bare root
+        ],
+    )
+    def test_base_symbol_examples(self, symbol, expected):
+        """Pinned symbol -> base symbol mappings from the task 2 spec."""
+        assert tradestation.models.base_symbol(symbol) == expected
+
+    def test_degenerate_month_code_only_symbol_is_empty(self):
+        """'@V26' strips to '' (month code + year is the whole root).
+
+        Deliberate, documented behavior: the regex strips the trailing futures
+        month code + 1-2 digit year, and there is no root left underneath.
+        """
+        assert tradestation.models.base_symbol("@V26") == ""

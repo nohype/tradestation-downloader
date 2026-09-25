@@ -1,9 +1,11 @@
 """Tests for the --export-ts-csv feature (TradeStation third-party ASCII format)."""
 
+import csv
 import importlib
+import io
 import json
 import shutil
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pandas as pd
 import pytest
@@ -103,6 +105,53 @@ def _metadata_json(temp_data_dir):
         },
     }
     (temp_data_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+
+def _ts_api(description):
+    """Sufficient api metadata carrying a distinct Description marker."""
+    return {
+        "AssetType": "FUTURE",
+        "Exchange": "CME",
+        "Description": description,
+        "PriceFormat": {
+            "Format": "Decimal",
+            "Decimals": "2",
+            "Increment": "0.25",
+            "PointValue": "50",
+        },
+    }
+
+
+def _write_ts_metadata(temp_data_dir, symbols):
+    """Overwrite metadata.json; symbols maps stored symbol -> (api dict, timezone)."""
+    metadata = {
+        "generated_at": "2024-01-01T00:00:00Z",
+        "data_dir": str(temp_data_dir),
+        "timezone": "UTC",
+        "symbols": {
+            symbol: {
+                "symbol": symbol,
+                "api": api,
+                "downloaded_data": {"exchange_timezone": timezone},
+            }
+            for symbol, (api, timezone) in symbols.items()
+        },
+    }
+    (temp_data_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+
+def _read_ts_ini(temp_data_dir):
+    """Parse plain_data/attributes.ini into {SYMBOL: row dict}."""
+    path = temp_data_dir.parent / "plain_data" / "attributes.ini"
+    records = [
+        record
+        for record in csv.reader(io.StringIO(path.read_text(encoding="utf-8")))
+        if record
+    ]
+    header = records[0]
+    return {
+        record[0]: dict(zip(header, record, strict=False)) for record in records[1:]
+    }
 
 
 class TestExportTsCsv:
@@ -426,3 +475,82 @@ class TestExportTsCsv:
 
         captured = capsys.readouterr()
         assert "no data found" in (captured.out + captured.err).lower()
+
+    def test_fallback_to_same_base_metadata_entry(self, temp_data_dir):
+        """Stored @MNG=11ORC exports using a sufficient @MNG=11INC metadata entry.
+
+        The exported file keeps the requested symbol's name; timezone and
+        DESCRIPTION come from the found entry; metadata regeneration is never
+        invoked.
+        """
+        df = _create_sample_df(_DATES)
+        self._save_symbol(temp_data_dir, "@MNG=11ORC", df)
+        _write_ts_metadata(
+            temp_data_dir,
+            {"@MNG=11INC": (_ts_api("Micro Henry Hub 11INC"), "America/Chicago")},
+        )
+
+        mock_run = Mock(side_effect=AssertionError("run_metadata must not be called"))
+        with patch("tradestation.metadata.run_metadata", mock_run):
+            result = self._call_export(
+                str(temp_data_dir / "config.yaml"),
+                ["@MNG=11ORC"],
+                self._make_config(temp_data_dir),
+            )
+
+        assert result == 0
+        mock_run.assert_not_called()
+
+        # The file is named after the REQUESTED stored symbol.
+        output = self._output_path(temp_data_dir, "@MNG=11ORC")
+        assert output.exists()
+        lines = output.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == len(df) + 1
+        # Timezone comes from the found @MNG=11INC entry (UTC -> America/Chicago).
+        assert lines[1].split(",")[1] == "03:30"
+
+        rows = _read_ts_ini(temp_data_dir)
+        assert rows["MNG=11ORC_ts"]["DESCRIPTION"] == "Micro Henry Hub 11INC"
+
+    def test_exact_entry_preferred_and_fallback_is_deterministic(self, temp_data_dir):
+        """With both variations present the exact key wins; a third variation
+        with no exact key falls back to the sorted-first same-base entry
+        (@MNG=11INC sorts before @MNG=11ORC)."""
+        self._save_symbol(temp_data_dir, "@MNG=11ORC", _create_sample_df(_DATES))
+        self._save_symbol(temp_data_dir, "@MNG=106XC", _create_sample_df(_DATES))
+        _write_ts_metadata(
+            temp_data_dir,
+            {
+                # Insertion order deliberately differs from sorted key order.
+                "@MNG=11ORC": (_ts_api("Micro Henry Hub 11ORC"), "UTC"),
+                "@MNG=11INC": (_ts_api("Micro Henry Hub 11INC"), "America/Chicago"),
+            },
+        )
+
+        mock_run = Mock(side_effect=AssertionError("run_metadata must not be called"))
+        config = self._make_config(temp_data_dir)
+        config_path = str(temp_data_dir / "config.yaml")
+        with patch("tradestation.metadata.run_metadata", mock_run):
+            # Exact key: the @MNG=11ORC entry supplies timezone (UTC) and Description.
+            assert self._call_export(config_path, ["@MNG=11ORC"], config) == 0
+            lines = (
+                self._output_path(temp_data_dir, "@MNG=11ORC")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            )
+            assert lines[1].split(",")[1] == "09:30"
+            rows = _read_ts_ini(temp_data_dir)
+            assert rows["MNG=11ORC_ts"]["DESCRIPTION"] == "Micro Henry Hub 11ORC"
+
+            # No exact key for @MNG=106XC: sorted-first same-base entry (@MNG=11INC).
+            assert self._call_export(config_path, ["@MNG=106XC"], config) == 0
+            lines = (
+                self._output_path(temp_data_dir, "@MNG=106XC")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            )
+            assert lines[1].split(",")[1] == "03:30"
+            rows = _read_ts_ini(temp_data_dir)
+            assert rows["MNG=106XC_ts"]["DESCRIPTION"] == "Micro Henry Hub 11INC"
+
+        mock_run.assert_not_called()

@@ -14,6 +14,7 @@ from pathlib import Path
 import pandas as pd
 
 from .metadata import derive_sessions, get_exchange_timezone
+from .models import base_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -130,12 +131,31 @@ def _entry_sufficient(entry) -> bool:
     return entry_timezone(entry) is not None
 
 
+def find_metadata_entry(metadata: dict | None, symbol: str) -> dict | None:
+    """Metadata entry for a symbol, falling back to same-base-symbol entries.
+
+    The exact-key entry is used when sufficient; otherwise the first sufficient
+    entry in sorted key order whose base symbol matches (e.g. a sufficient
+    @MNG=11INC entry can serve @MNG=11ORC and @MNGV26).
+    """
+    if not metadata:
+        return None
+    entries = metadata.get("symbols") or {}
+    exact = entries.get(symbol)
+    if _entry_sufficient(exact):
+        return exact
+    base = base_symbol(symbol)
+    for key in sorted(entries):
+        if base_symbol(key) == base and _entry_sufficient(entries[key]):
+            return entries[key]
+    return None
+
+
 def metadata_sufficient(metadata: dict | None, symbols: list[str]) -> bool:
     """True when metadata.json has complete data for every requested symbol."""
     if not metadata:
         return False
-    entries = metadata.get("symbols") or {}
-    return all(_entry_sufficient(entries.get(symbol)) for symbol in symbols)
+    return all(find_metadata_entry(metadata, symbol) is not None for symbol in symbols)
 
 
 def ensure_metadata(config_path: str, data_dir: Path, symbols: list[str]) -> dict | None:
@@ -159,9 +179,8 @@ def ensure_metadata(config_path: str, data_dir: Path, symbols: list[str]) -> dic
         logger.error("metadata.json still missing after regeneration")
         return None
     if not metadata_sufficient(metadata, symbols):
-        entries = metadata.get("symbols") or {}
         insufficient = [
-            symbol for symbol in symbols if not _entry_sufficient(entries.get(symbol))
+            symbol for symbol in symbols if find_metadata_entry(metadata, symbol) is None
         ]
         logger.error(
             "metadata.json still insufficient after regeneration for: %s",
