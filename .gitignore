@@ -46,3 +46,5 @@ Thumbs.db
 logs/
 /.audit
 /.pm_research
+/.pm
+
