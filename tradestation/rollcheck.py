@@ -10,7 +10,7 @@ import requests
 
 from .auth import TradeStationAuth
 from .metadata import fetch_symbol_details
-from .models import DownloadConfig
+from .models import DownloadConfig, base_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,8 @@ BASE_URL_V2 = "https://api.tradestation.com/v2"
 
 NA = "n/a"
 
-# Default for --roll-days: roll when the front contract expires this soon.
+# Default for --roll-days: roll when the front contract's expiration or first
+# notice date (whichever is earlier) is this soon.
 DEFAULT_ROLL_DAYS = 6
 
 
@@ -44,6 +45,9 @@ class RollcheckRow:
     day: date | None = None
     current_expiry: date | None = None
     next_expiry: date | None = None
+    current_fnd: date | None = None
+    roll_date: date | None = None  # earlier of current_expiry / current_fnd
+    roll_date_kind: str | None = None  # "ED" or "FND"
     days_to_expiry: int | None = None
 
 
@@ -71,9 +75,10 @@ def _api_get(auth: TradeStationAuth, url: str, params: dict | None = None):
 def _parse_datetime(value) -> datetime | None:
     """Parse an API timestamp, returning None on failure.
 
-    Handles both ISO 8601 (e.g. bar ``TimeStamp`` fields) and the legacy
-    ASP.NET JSON date format ``/Date(<epoch_ms>)/`` used by the v2
-    symbol-search endpoint's ``ExpirationDate``.
+    Handles both ISO 8601 (e.g. bar ``TimeStamp`` fields and the v3 quote
+    ``FirstNoticeDate``) and the legacy ASP.NET JSON date format
+    ``/Date(<epoch_ms>)/`` used by the v2 symbol-search endpoint's
+    ``ExpirationDate``.
     """
     if not value:
         return None
@@ -99,19 +104,30 @@ def _parse_int(value) -> int | None:
 def resolve_roots(auth: TradeStationAuth, symbols: list[str]) -> dict[str, str]:
     """Determine the base contract root for each symbol.
 
-    Prefers the symbol-details endpoint's ``Root`` field; falls back to
-    stripping the leading ``@`` and any ``=...`` suffix.
+    Roots are derived from the symbol itself ('@MNG', 'MNG', '@MNG=11ORC' and
+    'MNGV26' all yield 'MNG'). The symbol-details endpoint's ``Root`` field is
+    consulted only for symbols that don't reduce to a root locally — bare
+    roots like 'MNG' are not tradeable symbols, so sending them to that
+    endpoint only produces misleading 'invalid symbol' errors.
     """
-    details = fetch_symbol_details(auth, symbols)
-    details_by_symbol = {d.get("Symbol"): d for d in details}
     roots = {}
+    underived = []
     for symbol in symbols:
-        detail = details_by_symbol.get(symbol) or {}
-        root = detail.get("Root")
-        if not root:
-            root = symbol.lstrip("@").split("=", 1)[0]
-            logger.debug("No Root in symbol details for %s; using %s", symbol, root)
-        roots[symbol] = root
+        root = base_symbol(symbol)
+        if root:
+            roots[symbol] = root
+        else:
+            underived.append(symbol)
+
+    if underived:
+        details = fetch_symbol_details(auth, underived)
+        details_by_symbol = {d.get("Symbol"): d for d in details}
+        for symbol in underived:
+            detail = details_by_symbol.get(symbol) or {}
+            root = detail.get("Root") or symbol.lstrip("@").split("=", 1)[0]
+            if not detail.get("Root"):
+                logger.debug("No Root in symbol details for %s; using %s", symbol, root)
+            roots[symbol] = root
     return roots
 
 
@@ -142,6 +158,13 @@ def fetch_contract_chain(auth: TradeStationAuth, root: str) -> list[tuple[str, d
         contracts.append((name, expiry))
     contracts.sort(key=lambda c: c[1])
     return contracts
+
+
+def fetch_quotes(auth: TradeStationAuth, symbols: list[str]) -> dict[str, dict]:
+    """Fetch v3 quote snapshots for the given symbols, keyed by symbol name."""
+    url = f"{BASE_URL_V3}/marketdata/quotes/{','.join(symbols)}"
+    data = _api_get(auth, url)
+    return {q.get("Symbol"): q for q in data.get("Quotes") or []}
 
 
 def fetch_daily_bars(auth: TradeStationAuth, contract: str) -> list[dict]:
@@ -205,9 +228,30 @@ def check_symbol(
     row.current, row.next = chain[0][0], chain[1][0]
     row.current_expiry = chain[0][1].date()
     row.next_expiry = chain[1][1].date()
-    row.days_to_expiry = (row.current_expiry - date.today()).days
-    if row.days_to_expiry <= roll_days:
-        row.rollover = "YES"
+
+    try:
+        quotes = fetch_quotes(auth, [row.current])
+        fnd = _parse_datetime((quotes.get(row.current) or {}).get("FirstNoticeDate"))
+        row.current_fnd = fnd.date() if fnd else None
+    except RollcheckError as e:
+        row.warning = True
+        row.warnings.append(
+            f"{symbol}: first notice date lookup failed for {row.current}: {e}"
+        )
+
+    # Roll by whichever deadline comes first: expiration (ED) or first notice
+    # (FND). If one is missing (e.g. no FND for cash-settled contracts), the
+    # other is used.
+    dated = [
+        (d, kind)
+        for d, kind in ((row.current_expiry, "ED"), (row.current_fnd, "FND"))
+        if d is not None
+    ]
+    if dated:
+        row.roll_date, row.roll_date_kind = min(dated)
+        row.days_to_expiry = (row.roll_date - date.today()).days
+        if row.days_to_expiry <= roll_days:
+            row.rollover = "YES"
 
     try:
         current_bars = fetch_daily_bars(auth, row.current)
@@ -274,10 +318,12 @@ def describe_contract(name: str | None, expiry: date | None) -> str:
 
     Prefers the contract symbol's month code, which is the contract month even
     when expiration falls in the prior month (e.g. CL); falls back to the
-    expiration date, then n/a.
+    expiration date, then n/a. The month code is the letter immediately
+    preceding the trailing 1-2 digit year, so roots containing digits
+    (e.g. '1OZZ26' -> 'Dec 2026', 'M2KZ26') parse correctly.
     """
     if name:
-        match = re.fullmatch(r"[A-Z]+([FGHJKMNQUVXZ])(\d{1,2})", name)
+        match = re.search(r"([FGHJKMNQUVXZ])(\d{1,2})$", name)
         if match:
             month = _MONTH_NAMES[_MONTH_CODES.index(match.group(1))]
             return f"{month} {2000 + int(match.group(2))}"
@@ -362,8 +408,8 @@ def run_rollcheck(config: DownloadConfig) -> int:
         data_day = days[0].isoformat() if len(set(days)) == 1 else "varies by symbol"
         print(f"Data day: {data_day}")
     print(
-        f"Roll rule: next OI or Vol higher, or current contract expires "
-        f"within {config.roll_days} days"
+        f"Roll rule: next OI or Vol higher, or earlier of expiration (ED) / "
+        f"first notice (FND) within {config.roll_days} days"
     )
     print(
         f"Roll recommended: {roll_count} of {len(rows)} "
@@ -387,6 +433,11 @@ def run_rollcheck(config: DownloadConfig) -> int:
             action = f"keep {row.current}"
         else:
             action = NA
+        exp_fnd = (
+            f"{row.roll_date.isoformat()} {{{row.roll_date_kind}}}"
+            if row.roll_date is not None
+            else NA
+        )
         table.append(
             [
                 row.symbol + (" (!)" if row.warning else ""),
@@ -394,14 +445,14 @@ def run_rollcheck(config: DownloadConfig) -> int:
                 next_cell,
                 _fmt_ratio(row.next_oi, row.current_oi),
                 _fmt_ratio(row.next_vol, row.current_vol),
-                row.current_expiry.isoformat() if row.current_expiry else NA,
+                exp_fnd,
                 str(row.days_to_expiry) if row.days_to_expiry is not None else NA,
                 action,
             ]
         )
 
     _print_table(
-        ["Symbol", "Current", "Next", "OI next/cur", "Vol next/cur", "Expires", "Days", "Action"],
+        ["Symbol", "Current", "Next", "OI next/cur", "Vol next/cur", "EXP/FND", "Days", "Action"],
         table,
         aligns=["<", "<", "<", ">", ">", "<", ">", "<"],
     )

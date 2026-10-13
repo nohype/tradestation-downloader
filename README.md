@@ -92,8 +92,29 @@ tradestation-download -w 1
 # Check whether each symbol's front contract should roll to the next
 tradestation-download --rollcheck
 
-# Roll check with a custom days-to-expiry trigger (default: 6)
+# Roll check with a custom days-to-expiry/first-notice trigger (default: 6)
 tradestation-download --rollcheck --roll-days 10
+```
+
+#### Rollover check output
+
+`--rollcheck` prints one row per symbol and recommends `ROLL -> <next>` or
+`keep <current>`. A roll is recommended when the next contract's open interest
+or volume exceeds the current contract's, or when the current contract's
+deadline is within `--roll-days` days (default: 6).
+
+The `EXP/FND` column shows the deadline: the earlier of the contract's
+**expiration date `{ED}`** and **first notice date `{FND}`** (the day after
+which long holders may be assigned physical delivery — important for
+physically-delivered contracts like CL or GC). If one date is unavailable —
+e.g. cash-settled contracts have no first notice date — the other is used.
+`Days` counts down to that deadline.
+
+```
+Symbol | Current        | Next           | OI next/cur | Vol next/cur | EXP/FND          | Days | Action
+-------+----------------+----------------+-------------+--------------+------------------+------+-------------
+@ES    | ESZ25 Dec 2025 | ESH26 Mar 2026 | 10.0%       | 2.0%         | 2025-12-19 {ED}  | 30   | keep ESZ25
+@CL    | CLZ25 Dec 2025 | CLF26 Jan 2026 | 45.0%       | 60.0%        | 2025-11-20 {FND} | 5    | ROLL -> CLF26
 ```
 
 > **Note:** On Windows, the `@` symbol has special meaning in CMD/PowerShell.

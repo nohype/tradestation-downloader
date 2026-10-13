@@ -129,7 +129,7 @@ Examples:
         type=int,
         default=6,
         metavar="N",
-        help="With --rollcheck: also roll when the current contract expires within N days (default: 6)",
+        help="With --rollcheck: also roll when the current contract's expiration or first notice date is within N days (default: 6)",
     )
     parser.add_argument(
         "-w", "--workers",

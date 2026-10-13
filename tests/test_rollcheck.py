@@ -1,8 +1,9 @@
 """Tests for the --rollcheck feature."""
 
 import argparse
+import logging
 from datetime import UTC, date, datetime, timedelta
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 from tradestation.cli import create_download_parser, run_download
 from tradestation.models import DownloadConfig
@@ -13,6 +14,7 @@ from tradestation.rollcheck import (
     describe_contract,
     fetch_contract_chain,
     last_closed_bar,
+    resolve_roots,
     run_rollcheck,
 )
 
@@ -67,10 +69,19 @@ def _bar(timestamp, volume, oi, status="Closed"):
     }
 
 
-def _make_get(chains=None, bars=None):
+def _quote(symbol, fnd=None):
+    """Build a quote snapshot as returned by the v3 quotes endpoint."""
+    quote = {"Symbol": symbol}
+    if fnd is not None:
+        quote["FirstNoticeDate"] = fnd
+    return quote
+
+
+def _make_get(chains=None, bars=None, quotes=None):
     """Build a requests.get replacement routing by URL."""
     chains = chains or {}
     bars = bars or {}
+    quotes = quotes or {}
 
     def fake_get(url, **_kwargs):
         if "/marketdata/symbols/" in url:
@@ -80,6 +91,11 @@ def _make_get(chains=None, bars=None):
                     "Symbols": [{"Symbol": s, "Root": _root_of(s)} for s in names],
                     "Errors": [],
                 }
+            )
+        if "/marketdata/quotes/" in url:
+            names = url.split("/marketdata/quotes/")[1].split(",")
+            return _response(
+                {"Quotes": [quotes.get(n, {"Symbol": n}) for n in names]}
             )
         if "/symbols/search/" in url:
             root = url.split("R=")[1].split("&")[0]
@@ -128,12 +144,12 @@ def _es_chain():
     ]
 
 
-def _run(capsys, chains=None, bars=None, config=None):
+def _run(capsys, chains=None, bars=None, quotes=None, config=None):
     """Run run_rollcheck with mocked HTTP and return (exit_code, output)."""
     config = config or _make_config()
     with (
         patch("requests.post", side_effect=_token_post),
-        patch("requests.get", side_effect=_make_get(chains, bars)),
+        patch("requests.get", side_effect=_make_get(chains, bars, quotes)),
     ):
         code = run_rollcheck(config)
     return code, capsys.readouterr().out
@@ -187,6 +203,82 @@ class TestContractChain:
         with patch("requests.get", side_effect=_make_get(chains={"ES": items})):
             chain = fetch_contract_chain(auth, "ES")
         assert [name for name, _ in chain] == ["ESZ26", "ESH27"]
+
+
+class TestResolveRoots:
+    """Root resolution derives from the symbol string; the symbol-details
+    endpoint is only a fallback for symbols that don't reduce locally."""
+
+    def test_derives_roots_without_api(self):
+        with patch("tradestation.rollcheck.fetch_symbol_details") as mock_fetch:
+            roots = resolve_roots(
+                Mock(), ["@ES", "MNG", "1OZ", "MNGV26", "@MNG=11ORC"]
+            )
+        assert roots == {
+            "@ES": "ES",
+            "MNG": "MNG",
+            "1OZ": "1OZ",
+            "MNGV26": "MNG",
+            "@MNG=11ORC": "MNG",
+        }
+        mock_fetch.assert_not_called()
+
+    def test_api_fallback_only_for_underived_symbols(self):
+        with patch(
+            "tradestation.rollcheck.fetch_symbol_details",
+            return_value=[{"Symbol": "@V26", "Root": "V"}],
+        ) as mock_fetch:
+            roots = resolve_roots(Mock(), ["@ES", "@V26"])
+        mock_fetch.assert_called_once_with(ANY, ["@V26"])
+        assert roots == {"@ES": "ES", "@V26": "V"}
+
+    def test_bare_roots_do_not_log_symbol_details_errors(self, caplog, capsys):
+        """Regression: bare roots are not tradeable symbols; sending them to
+        the symbol-details endpoint only produces misleading
+        'NotFound - invalid symbol' errors for valid input."""
+
+        def fake_get(url, **_kwargs):
+            if "/marketdata/symbols/" in url:
+                # The real endpoint rejects bare roots with per-symbol errors
+                names = url.split("/marketdata/symbols/")[1].split(",")
+                return _response(
+                    {
+                        "Symbols": [],
+                        "Errors": [
+                            {
+                                "Symbol": s,
+                                "Error": "NotFound",
+                                "Message": "invalid symbol",
+                            }
+                            for s in names
+                        ],
+                    }
+                )
+            if "/marketdata/quotes/" in url:
+                return _response({"Quotes": []})
+            if "/symbols/search/" in url:
+                root = url.split("R=")[1].split("&")[0]
+                return _response(chains.get(root, []))
+            if "/barcharts/" in url:
+                return _response({"Bars": []})
+            raise AssertionError(f"unexpected URL: {url}")
+
+        chains = {
+            "MNG": [
+                _contract("MNGZ26", _expiry(30)),
+                _contract("MNGH27", _expiry(120)),
+            ]
+        }
+        with (
+            patch("requests.post", side_effect=_token_post),
+            patch("requests.get", side_effect=fake_get),
+            caplog.at_level(logging.ERROR),
+        ):
+            code = run_rollcheck(_make_config(symbols=["MNG"]))
+        out = capsys.readouterr().out
+        assert code == 0
+        assert "MNGZ26 Dec 2026" in out
+        assert not caplog.records
 
 
 class TestLastClosedBar:
@@ -330,6 +422,7 @@ class TestExpiryTrigger:
         ]
         with (
             patch("tradestation.rollcheck.fetch_contract_chain", return_value=chain),
+            patch("tradestation.rollcheck.fetch_quotes", return_value={}),
             patch(
                 "tradestation.rollcheck.fetch_daily_bars",
                 return_value=[_bar("2025-12-05T00:00:00Z", 100, 10)],
@@ -337,8 +430,94 @@ class TestExpiryTrigger:
         ):
             row = check_symbol(Mock(), "@ES", "ES")
         assert row.current_expiry == date.today() + timedelta(days=6)
+        assert row.current_fnd is None
+        assert row.roll_date == row.current_expiry
+        assert row.roll_date_kind == "ED"
         assert row.days_to_expiry == 6
         assert row.rollover == "YES"
+
+
+class TestFirstNoticeDate:
+    """Roll date is the earlier of expiration (ED) and first notice (FND)."""
+
+    def _es_quotes(self, fnd_days):
+        return {"ESZ25": _quote("ESZ25", fnd=_expiry_iso(fnd_days))}
+
+    def test_earlier_fnd_shown_with_fnd_tag(self, capsys):
+        # FND in 20 days, expiry in 30: the earlier date (FND) wins
+        _, out = _run(capsys, chains={"ES": _es_chain()}, quotes=self._es_quotes(20))
+        cells = _table_cells(out, "@ES")
+        assert cells[5] == f"{(date.today() + timedelta(days=20)).isoformat()} {{FND}}"
+        assert cells[6] == "20"
+
+    def test_later_fnd_ignored_in_favor_of_expiry(self, capsys):
+        # FND in 45 days, expiry in 30: expiry remains the roll date
+        _, out = _run(capsys, chains={"ES": _es_chain()}, quotes=self._es_quotes(45))
+        cells = _table_cells(out, "@ES")
+        assert cells[5] == f"{(date.today() + timedelta(days=30)).isoformat()} {{ED}}"
+        assert cells[6] == "30"
+
+    def test_missing_fnd_falls_back_to_expiry(self, capsys):
+        _, out = _run(capsys, chains={"ES": _es_chain()})
+        cells = _table_cells(out, "@ES")
+        assert cells[5] == f"{(date.today() + timedelta(days=30)).isoformat()} {{ED}}"
+
+    def test_fnd_alone_triggers_roll(self, capsys):
+        # FND in 4 days, expiry in 30: FND within roll-days forces ROLL
+        code, out = _run(capsys, chains={"ES": _es_chain()}, quotes=self._es_quotes(4))
+        assert code == 0
+        assert "ROLL -> ESH26" in out
+
+    def test_passed_fnd_triggers_roll(self, capsys):
+        # FND already past (negative days): still forces ROLL
+        code, out = _run(capsys, chains={"ES": _es_chain()}, quotes=self._es_quotes(-2))
+        assert code == 0
+        assert "ROLL -> ESH26" in out
+
+    def test_quote_lookup_failure_warns_and_uses_expiry(self, capsys):
+        base_get = _make_get(chains={"ES": _es_chain()})
+
+        def fake_get(url, **kwargs):
+            if "/marketdata/quotes/" in url:
+                return _response({"error": "boom"}, status_code=500)
+            return base_get(url, **kwargs)
+
+        with (
+            patch("requests.post", side_effect=_token_post),
+            patch("requests.get", side_effect=fake_get),
+        ):
+            code = run_rollcheck(_make_config())
+        out = capsys.readouterr().out
+        assert code == 0
+        assert "first notice date lookup failed" in out
+        assert "(!)" in out
+        assert "{ED}" in out
+        assert "keep ESZ25" in out
+
+    def test_check_symbol_sets_fnd_fields(self):
+        chain = [
+            ("ESZ25", _dt(30)),
+            ("ESH26", _dt(120)),
+        ]
+        quotes = {"ESZ25": {"FirstNoticeDate": _expiry_iso(20)}}
+        with (
+            patch("tradestation.rollcheck.fetch_contract_chain", return_value=chain),
+            patch("tradestation.rollcheck.fetch_quotes", return_value=quotes),
+            patch(
+                "tradestation.rollcheck.fetch_daily_bars",
+                return_value=[_bar("2025-12-05T00:00:00Z", 100, 10)],
+            ),
+        ):
+            row = check_symbol(Mock(), "@ES", "ES")
+        assert row.current_expiry == date.today() + timedelta(days=30)
+        assert row.current_fnd == date.today() + timedelta(days=20)
+        assert row.roll_date == row.current_fnd
+        assert row.roll_date_kind == "FND"
+        assert row.days_to_expiry == 20
+
+    def test_column_header_is_exp_fnd(self, capsys):
+        _, out = _run(capsys, chains={"ES": _es_chain()})
+        assert "EXP/FND" in out
 
 
 class TestDescribeContract:
@@ -349,9 +528,17 @@ class TestDescribeContract:
         assert describe_contract("ESH26", None) == "Mar 2026"
         assert describe_contract("CLF26", None) == "Jan 2026"
 
+    def test_parses_month_code_when_root_contains_digits(self):
+        # Roots may contain digits: 1OZ (1-oz gold), M2K (micro Russell), 6E (euro FX)
+        assert describe_contract("1OZZ26", None) == "Dec 2026"
+        assert describe_contract("M2KZ26", None) == "Dec 2026"
+        assert describe_contract("6EH27", None) == "Mar 2027"
+
     def test_symbol_month_wins_over_expiry(self):
         # CLF26 is the Jan 2026 contract even though it expires in late Dec 2025
         assert describe_contract("CLF26", date(2025, 12, 22)) == "Jan 2026"
+        # 1OZZ26 is the Dec 2026 contract even though it expires in Nov 2026
+        assert describe_contract("1OZZ26", date(2026, 11, 20)) == "Dec 2026"
 
     def test_falls_back_to_expiry(self):
         assert describe_contract("ODD", date(2026, 11, 15)) == "Nov 2026"
@@ -378,6 +565,18 @@ class TestOutputLayout:
         assert "ESZ25 Dec 2025" in out
         assert "ESH26 Mar 2026" in out
 
+    def test_contracts_described_with_month_year_for_digit_roots(self, capsys):
+        # 1OZZ26 must render "Dec 2026" (contract month), not the Nov expiry month
+        chains = {
+            "1OZ": [
+                _contract("1OZZ26", _expiry(30)),
+                _contract("1OZG27", _expiry(120)),
+            ]
+        }
+        _, out = _run(capsys, chains=chains, config=_make_config(symbols=["@1OZ"]))
+        assert "1OZZ26 Dec 2026" in out
+        assert "1OZG27 Feb 2027" in out
+
     def test_expiry_and_days_columns_populated(self, capsys):
         bars = {
             "ESZ25": [_bar("2025-12-05T00:00:00Z", 5000, 1000)],
@@ -385,7 +584,7 @@ class TestOutputLayout:
         }
         _, out = _run(capsys, chains={"ES": _es_chain()}, bars=bars)
         cells = _table_cells(out, "@ES")
-        assert cells[5] == (date.today() + timedelta(days=30)).isoformat()
+        assert cells[5] == f"{(date.today() + timedelta(days=30)).isoformat()} {{ED}}"
         assert cells[6] == "30"
 
     def test_headline_count_singular(self, capsys):
@@ -599,6 +798,7 @@ class TestCheckSymbol:
                 "tradestation.rollcheck.fetch_contract_chain",
                 return_value=[("ESZ25", _dt(30)), ("ESH26", _dt(120))],
             ),
+            patch("tradestation.rollcheck.fetch_quotes", return_value={}),
             patch(
                 "tradestation.rollcheck.fetch_daily_bars",
                 side_effect=lambda _auth, contract: bars[contract],

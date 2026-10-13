@@ -63,7 +63,7 @@ class DownloadConfig:
     storage_format: StorageFormat = StorageFormat.SINGLE
     compression: Compression = Compression.ZSTD
     datetime_index: bool = True  # Save with datetime as index (adds _index_1 suffix)
-    roll_days: int = 6  # --rollcheck: roll when the front contract expires within this many days
+    roll_days: int = 6  # --rollcheck: roll when the front contract's expiration or first notice is within this many days
 
     def __post_init__(self):
         """Validate and convert fields after initialization."""
