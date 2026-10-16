@@ -43,6 +43,23 @@ class Compression(Enum):
             raise ValueError(f"Invalid compression: '{value}'. Must be one of: {valid}") from err
 
 
+class OutputFormat(Enum):
+    """Output format for downloaded market data."""
+
+    PARQUET = "parquet"    # Native Parquet files (default)
+    CSV = "csv"            # Plain CSV .txt files in plain_data
+    TS_CSV = "ts_csv"      # TradeStation third-party ASCII format in plain_data
+
+    @classmethod
+    def from_string(cls, value: str) -> "OutputFormat":
+        """Create OutputFormat from string value."""
+        try:
+            return cls(value.lower())
+        except ValueError as err:
+            valid = ", ".join(f"'{f.value}'" for f in cls)
+            raise ValueError(f"Invalid output format: '{value}'. Must be one of: {valid}") from err
+
+
 @dataclass
 class DownloadConfig:
     """Configuration for the TradeStation data downloader."""
@@ -63,7 +80,10 @@ class DownloadConfig:
     storage_format: StorageFormat = StorageFormat.SINGLE
     compression: Compression = Compression.ZSTD
     datetime_index: bool = True  # Save with datetime as index (adds _index_1 suffix)
-    roll_days: int = 6  # --rollcheck: roll when the front contract's expiration or first notice is within this many days
+    # --rollcheck: roll when the front contract's expiration/first-notice is within N days
+    roll_days: int = 6
+    output_formats: list[OutputFormat] = field(default_factory=lambda: [OutputFormat.PARQUET])
+    config_path: str | None = None
 
     def __post_init__(self):
         """Validate and convert fields after initialization."""
@@ -71,6 +91,20 @@ class DownloadConfig:
             self.storage_format = StorageFormat.from_string(self.storage_format)
         if isinstance(self.compression, str):
             self.compression = Compression.from_string(self.compression)
+        if self.output_formats is None:
+            self.output_formats = [OutputFormat.PARQUET]
+        self.output_formats = [
+            fmt if isinstance(fmt, OutputFormat) else OutputFormat.from_string(fmt)
+            for fmt in self.output_formats
+        ]
+        if not isinstance(self.interval, int) or isinstance(self.interval, bool):
+            raise ValueError(
+                f"interval must be an integer, got {type(self.interval).__name__}"
+            )
+        if not 1 <= self.interval <= 1440:
+            raise ValueError(
+                f"interval must be between 1 and 1440 minutes, got {self.interval}"
+            )
 
 
 def validate_symbol(symbol: str) -> None:

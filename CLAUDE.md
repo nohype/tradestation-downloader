@@ -48,6 +48,9 @@ tradestation-download -s "@ES" "@NQ" "@CL"   # Specific symbols (quote @ on Wind
 tradestation-download --full                  # Full download
 tradestation-download --storage-format daily  # Daily partitions
 tradestation-download --compression snappy    # Use snappy compression
+tradestation-download --csv                   # Also write plain CSV files in plain_data
+tradestation-download --ts-csv              # Also write TradeStation ASCII files in plain_data
+tradestation-download --csv --ts-csv        # Write both CSV formats in one run
 tradestation-download --list-symbols          # List all symbols
 tradestation-download --list-categories       # List symbol categories
 tradestation-download --category index        # Download category
@@ -93,7 +96,11 @@ tradestation:
   client_secret: "..."
   refresh_token: "..."
 
-storage_format: "single"  # or "daily", "monthly"
+storage_format: "single"  # or "daily", "monthly" (applies to Parquet output)
+output_formats:
+  - "parquet"              # always kept as canonical storage
+  # - "csv"                # also write plain CSV .txt files in plain_data
+  # - "ts_csv"             # also write TradeStation ASCII files in plain_data
 compression: "zstd"       # or "snappy", "gzip", "lz4", "none"
 data_dir: "./data"
 start_date: "2007-01-01"
@@ -102,6 +109,7 @@ start_date: "2007-01-01"
 ## Key Classes
 
 - `StorageFormat` (Enum): SINGLE, DAILY, MONTHLY
+- `OutputFormat` (Enum): PARQUET, CSV, TS_CSV
 - `Compression` (Enum): ZSTD, SNAPPY, GZIP, LZ4, NONE
 - `DownloadConfig` (dataclass): All configuration parameters
 - `TradeStationAuth`: OAuth2 token management

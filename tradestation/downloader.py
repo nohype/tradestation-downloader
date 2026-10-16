@@ -15,7 +15,7 @@ import pandas as pd
 import requests
 
 from .auth import AuthenticationError, TradeStationAuth
-from .models import DownloadConfig, validate_symbol
+from .models import DownloadConfig, OutputFormat, validate_symbol
 from .storage import create_storage
 
 logger = logging.getLogger(__name__)
@@ -35,7 +35,11 @@ _COLUMN_MAP = {
     "OpenInterest": "open_interest",
     "TotalTicks": "total_ticks",
 }
-_OUTPUT_COLUMNS = ["datetime", "open", "high", "low", "close", "volume", "up_volume", "down_volume", "up_ticks", "down_ticks", "open_interest", "total_ticks"]
+_OUTPUT_COLUMNS = [
+    "datetime", "open", "high", "low", "close", "volume",
+    "up_volume", "down_volume", "up_ticks", "down_ticks",
+    "open_interest", "total_ticks",
+]
 
 
 @dataclass
@@ -46,6 +50,7 @@ class DownloadStats:
     symbols_skipped: int = 0
     bars_downloaded: int = 0
     errors: int = 0
+    export_errors: int = 0
     failed_symbols: list[str] = field(default_factory=list)
     start_time: datetime | None = None
     end_time: datetime | None = None
@@ -115,9 +120,41 @@ class TradeStationDownloader:
             # Parallel download
             self._download_parallel(symbols, incremental, max_workers)
 
+        # Export to requested plain-text formats after the Parquet download is complete.
+        plain_text_formats = (OutputFormat.CSV, OutputFormat.TS_CSV)
+        if any(fmt in plain_text_formats for fmt in self.config.output_formats):
+            self._export_to_plain_text(symbols)
+
         self._stats.end_time = datetime.now()
         self._log_summary()
         return self._stats
+
+    def _export_to_plain_text(self, symbols: list[str]) -> None:
+        """Export downloaded Parquet data to requested plain-text formats.
+
+        Uses the in-memory config and storage so CLI overrides take effect.
+        """
+        config_path = self.config.config_path or "config.yaml"
+
+        if OutputFormat.TS_CSV in self.config.output_formats:
+            from .csv_export import run_export_ts_csv
+            result = run_export_ts_csv(
+                config_path, symbols, config=self.config, storage=self._storage
+            )
+            if result != 0:
+                logger.error("TS CSV export failed")
+                with self._stats_lock:
+                    self._stats.export_errors += 1
+
+        if OutputFormat.CSV in self.config.output_formats:
+            from .csv_export import run_export_csv
+            result = run_export_csv(
+                config_path, symbols, config=self.config, storage=self._storage
+            )
+            if result != 0:
+                logger.error("CSV export failed")
+                with self._stats_lock:
+                    self._stats.export_errors += 1
 
     def _download_sequential(
         self,
@@ -189,7 +226,11 @@ class TradeStationDownloader:
         validate_symbol(symbol)
         start_date, has_existing = self._get_download_start(symbol, incremental)
 
-        logger.info("  [%s] Downloading from %s...", symbol, start_date.strftime("%Y-%m-%d %H:%M:%S"))
+        logger.info(
+            "  [%s] Downloading from %s...",
+            symbol,
+            start_date.strftime("%Y-%m-%d %H:%M:%S"),
+        )
         new_df = self._fetch_bars(symbol, start_date)
 
         if new_df.empty and not has_existing:
@@ -205,7 +246,7 @@ class TradeStationDownloader:
                 self._stats.symbols_processed += 1
             return
 
-        # Use optimized append - only updates affected partitions for partitioned storage
+        # Append to Parquet storage (canonical source of truth)
         self._storage.append(symbol, new_df)
 
         with self._stats_lock:
@@ -236,7 +277,14 @@ class TradeStationDownloader:
 
             oldest = pd.to_datetime(bars[0]["TimeStamp"]).replace(tzinfo=None)
             newest = pd.to_datetime(bars[-1]["TimeStamp"]).replace(tzinfo=None)
-            logger.info("  [%s] Batch %d: %d bars (%s to %s)", symbol, batch_num, len(bars), oldest.date(), newest.date())
+            logger.info(
+                "  [%s] Batch %d: %d bars (%s to %s)",
+                symbol,
+                batch_num,
+                len(bars),
+                oldest.date(),
+                newest.date(),
+            )
 
             if oldest <= start_date:
                 break
@@ -316,7 +364,12 @@ class TradeStationDownloader:
         df = df[[c for c in _OUTPUT_COLUMNS if c in df.columns]]
 
         # Convert OHLCV to numeric types
-        for col in ["open", "high", "low", "close", "volume", "up_volume", "down_volume", "up_ticks", "down_ticks", "open_interest", "total_ticks"]:
+        numeric_cols = [
+            "open", "high", "low", "close", "volume",
+            "up_volume", "down_volume", "up_ticks", "down_ticks",
+            "open_interest", "total_ticks",
+        ]
+        for col in numeric_cols:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
                 if col in ("open_interest", "total_ticks"):
@@ -327,10 +380,12 @@ class TradeStationDownloader:
         return df.reset_index(drop=True)
 
     def _log_start(self, symbols: list[str], incremental: bool) -> None:
+        formats = ", ".join(fmt.value for fmt in self.config.output_formats)
         logger.info("")
         logger.info("#" * 60)
         logger.info("Starting download: %d symbols", len(symbols))
         logger.info("Data directory: %s", Path(self.config.data_dir).absolute())
+        logger.info("Output formats: %s", formats)
         logger.info("Storage format: %s", self.config.storage_format.value)
         logger.info("Compression: %s", self.config.compression.value)
         logger.info("Incremental: %s", incremental)
@@ -341,9 +396,17 @@ class TradeStationDownloader:
         logger.info("")
         logger.info("=" * 60)
         logger.info("DOWNLOAD COMPLETE")
-        logger.info("Processed: %d | Skipped: %d | Errors: %d",
-                    self._stats.symbols_processed, self._stats.symbols_skipped, self._stats.errors)
-        logger.info("Bars downloaded: %d | Time: %s", self._stats.bars_downloaded, self._stats.elapsed)
+        logger.info(
+            "Processed: %d | Skipped: %d | Errors: %d",
+            self._stats.symbols_processed,
+            self._stats.symbols_skipped,
+            self._stats.errors,
+        )
+        logger.info(
+            "Bars downloaded: %d | Time: %s",
+            self._stats.bars_downloaded,
+            self._stats.elapsed,
+        )
         if self._stats.failed_symbols:
             logger.info("Failed: %s", ", ".join(self._stats.failed_symbols))
         logger.info("=" * 60)

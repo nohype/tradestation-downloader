@@ -6,6 +6,7 @@ import tradestation.models
 from tradestation.models import (
     DEFAULT_SYMBOLS,
     DownloadConfig,
+    OutputFormat,
     StorageFormat,
     get_all_symbols,
     get_symbols_by_categories,
@@ -31,6 +32,24 @@ class TestStorageFormat:
             StorageFormat.from_string("invalid")
 
 
+class TestOutputFormat:
+    """Tests for OutputFormat enum."""
+
+    def test_values(self):
+        assert OutputFormat.PARQUET.value == "parquet"
+        assert OutputFormat.CSV.value == "csv"
+        assert OutputFormat.TS_CSV.value == "ts_csv"
+
+    def test_from_string(self):
+        assert OutputFormat.from_string("parquet") == OutputFormat.PARQUET
+        assert OutputFormat.from_string("CSV") == OutputFormat.CSV
+        assert OutputFormat.from_string("Ts_Csv") == OutputFormat.TS_CSV
+
+    def test_from_string_invalid(self):
+        with pytest.raises(ValueError, match="Invalid output format"):
+            OutputFormat.from_string("invalid")
+
+
 class TestDownloadConfig:
     """Tests for DownloadConfig dataclass."""
 
@@ -42,6 +61,7 @@ class TestDownloadConfig:
         )
         assert config.data_dir == "./data"
         assert config.storage_format == StorageFormat.SINGLE
+        assert config.output_formats == [OutputFormat.PARQUET]
         assert config.interval == 1
         assert config.unit == "Minute"
 
@@ -53,6 +73,84 @@ class TestDownloadConfig:
             storage_format="monthly",
         )
         assert config.storage_format == StorageFormat.MONTHLY
+
+    def test_interval_can_be_set(self):
+        config = DownloadConfig(
+            client_id="id",
+            client_secret="secret",
+            refresh_token="token",
+            interval=60,
+        )
+        assert config.interval == 60
+
+    def test_interval_boundary_values(self):
+        assert DownloadConfig(
+            client_id="id",
+            client_secret="secret",
+            refresh_token="token",
+            interval=1,
+        ).interval == 1
+        assert DownloadConfig(
+            client_id="id",
+            client_secret="secret",
+            refresh_token="token",
+            interval=1440,
+        ).interval == 1440
+
+    @pytest.mark.parametrize("interval", [0, -1, 1441, 10000])
+    def test_interval_out_of_range_raises(self, interval):
+        with pytest.raises(ValueError, match="interval must be between 1 and 1440"):
+            DownloadConfig(
+                client_id="id",
+                client_secret="secret",
+                refresh_token="token",
+                interval=interval,
+            )
+
+    def test_output_formats_string_conversion(self):
+        config = DownloadConfig(
+            client_id="id",
+            client_secret="secret",
+            refresh_token="token",
+            output_formats=["csv", "ts_csv"],
+        )
+        assert config.output_formats == [OutputFormat.CSV, OutputFormat.TS_CSV]
+
+    def test_output_formats_enum_passthrough(self):
+        config = DownloadConfig(
+            client_id="id",
+            client_secret="secret",
+            refresh_token="token",
+            output_formats=[OutputFormat.CSV, OutputFormat.PARQUET],
+        )
+        assert config.output_formats == [OutputFormat.CSV, OutputFormat.PARQUET]
+
+    def test_output_formats_default_when_none(self):
+        config = DownloadConfig(
+            client_id="id",
+            client_secret="secret",
+            refresh_token="token",
+            output_formats=None,
+        )
+        assert config.output_formats == [OutputFormat.PARQUET]
+
+    def test_interval_must_be_integer(self):
+        with pytest.raises(ValueError, match="interval must be an integer"):
+            DownloadConfig(
+                client_id="id",
+                client_secret="secret",
+                refresh_token="token",
+                interval=5.5,
+            )
+
+    def test_interval_bool_rejected(self):
+        with pytest.raises(ValueError, match="interval must be an integer"):
+            DownloadConfig(
+                client_id="id",
+                client_secret="secret",
+                refresh_token="token",
+                interval=True,
+            )
 
     def test_categories(self):
         config_without = DownloadConfig(

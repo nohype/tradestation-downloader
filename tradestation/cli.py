@@ -11,10 +11,26 @@ from .downloader import TradeStationDownloader
 from .models import (
     DEFAULT_SYMBOLS,
     Compression,
+    OutputFormat,
     StorageFormat,
     get_symbols_by_categories,
     validate_symbol,
 )
+
+
+def _interval_type(value: str) -> int:
+    """Argparse type validator for the --interval flag."""
+    try:
+        interval = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"interval must be an integer, got {value!r}"
+        ) from exc
+    if not 1 <= interval <= 1440:
+        raise argparse.ArgumentTypeError(
+            f"interval must be between 1 and 1440 minutes, got {interval}"
+        )
+    return interval
 
 # Configure logging
 logging.basicConfig(
@@ -37,6 +53,7 @@ Examples:
   %(prog)s -s @ES @NQ @CL           Download specific symbols
   %(prog)s --full                   Full download (ignore existing data)
   %(prog)s --storage-format daily   Use daily partitioned storage
+  %(prog)s --interval 5              Download 5-minute bars
   %(prog)s --list-symbols           List all default symbols
   %(prog)s --list-categories        List symbol categories
   %(prog)s --all-categories         Download symbols from all configured categories
@@ -74,6 +91,31 @@ Examples:
         help="Parquet compression: zstd (default), snappy, gzip, lz4, or none",
     )
     parser.add_argument(
+        "--parquet",
+        action="store_true",
+        help="Store downloaded data as Parquet files (default when no output format is specified)",
+    )
+    parser.add_argument(
+        "--csv",
+        action="store_true",
+        dest="csv_output",
+        help="Also write plain CSV .txt files in plain_data "
+             "(Parquet is still written as canonical storage)",
+    )
+    parser.add_argument(
+        "--ts-csv",
+        action="store_true",
+        dest="ts_csv_output",
+        help="Also write TradeStation third-party ASCII files in plain_data "
+             "(Parquet is still written as canonical storage)",
+    )
+    parser.add_argument(
+        "--interval",
+        type=_interval_type,
+        metavar="MINUTES",
+        help="Bar size in minutes: 1-1440 (overrides config)",
+    )
+    parser.add_argument(
         "--no-datetime-index",
         action="store_true",
         help="Save as @ES (raw) instead of @ES_index_1 (with datetime index)",
@@ -107,17 +149,20 @@ Examples:
     parser.add_argument(
         "--metadata",
         action="store_true",
-        help="Fetch symbol metadata from TradeStation API and derive session times from downloaded data, then exit",
+        help="Fetch symbol metadata from TradeStation API and derive session times "
+             "from downloaded data, then exit",
     )
     parser.add_argument(
         "--export-csv",
         action="store_true",
-        help="Export downloaded data to CSV (.txt) files in a 'plain_data' sibling directory, then exit",
+        help="Export downloaded data to CSV (.txt) files in a 'plain_data' "
+             "sibling directory, then exit",
     )
     parser.add_argument(
         "--export-ts-csv",
         action="store_true",
-        help="Export downloaded data to TradeStation third-party ASCII format files (<symbol>_ts.txt) in a 'plain_data' sibling directory, then exit",
+        help="Export downloaded data to TradeStation third-party ASCII format "
+             "files (<symbol>_ts.txt) in a 'plain_data' sibling directory, then exit",
     )
     parser.add_argument(
         "--rollcheck",
@@ -129,7 +174,8 @@ Examples:
         type=int,
         default=6,
         metavar="N",
-        help="With --rollcheck: also roll when the current contract's expiration or first notice date is within N days (default: 6)",
+        help="With --rollcheck: also roll when the current contract's expiration "
+             "or first notice date is within N days (default: 6)",
     )
     parser.add_argument(
         "-w", "--workers",
@@ -217,6 +263,21 @@ def run_download(args: argparse.Namespace) -> int:
     for symbol in config.symbols:
         validate_symbol(symbol)
 
+    # Resolve requested output formats. CLI flags override the config; when no
+    # format flag is passed, preserve whatever the config/YAML already set.
+    if args.parquet or args.csv_output or args.ts_csv_output:
+        requested_formats = []
+        if args.parquet:
+            requested_formats.append(OutputFormat.PARQUET)
+        if args.csv_output:
+            requested_formats.append(OutputFormat.CSV)
+        if args.ts_csv_output:
+            requested_formats.append(OutputFormat.TS_CSV)
+        config.output_formats = requested_formats
+
+    # Remember the config file path so the downloader can export after downloading.
+    config.config_path = args.config
+
     if args.rollcheck:
         from .rollcheck import run_rollcheck
         config.roll_days = args.roll_days
@@ -229,6 +290,10 @@ def run_download(args: argparse.Namespace) -> int:
     # Override compression if provided
     if args.compression:
         config.compression = Compression.from_string(args.compression)
+
+    # Override interval if provided
+    if args.interval is not None:
+        config.interval = args.interval
 
     # Override datetime_index if provided
     if args.no_datetime_index:

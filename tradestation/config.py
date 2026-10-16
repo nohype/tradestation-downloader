@@ -6,7 +6,7 @@ from pathlib import Path
 
 import yaml
 
-from .models import DEFAULT_SYMBOLS, Compression, DownloadConfig, StorageFormat
+from .models import DEFAULT_SYMBOLS, Compression, DownloadConfig, OutputFormat, StorageFormat
 
 
 class ConfigurationError(Exception):
@@ -86,6 +86,28 @@ def _parse_config(data: dict) -> DownloadConfig:
     except ValueError as e:
         raise ConfigurationError(str(e)) from e
 
+    # Parse output formats
+    output_formats_raw = data.get("output_formats") or ["parquet"]
+    if not isinstance(output_formats_raw, list):
+        raise ConfigurationError(
+            f"output_formats must be a list, got {type(output_formats_raw).__name__}"
+        )
+    try:
+        output_formats = [OutputFormat.from_string(fmt) for fmt in output_formats_raw]
+    except ValueError as e:
+        raise ConfigurationError(str(e)) from e
+
+    # Validate interval
+    interval = data.get("interval", 1)
+    if not isinstance(interval, int) or isinstance(interval, bool):
+        raise ConfigurationError(
+            f"interval must be an integer, got {type(interval).__name__}"
+        )
+    if not 1 <= interval <= 1440:
+        raise ConfigurationError(
+            f"interval must be between 1 and 1440 minutes, got {interval}"
+        )
+
     return DownloadConfig(
         client_id=ts_config["client_id"],
         client_secret=ts_config["client_secret"],
@@ -94,13 +116,14 @@ def _parse_config(data: dict) -> DownloadConfig:
         start_date=data.get("start_date", "2007-01-01"),
         symbols=symbols,
         categories=categories,
-        interval=data.get("interval", 1),
+        interval=interval,
         unit=data.get("unit", "Minute"),
         max_bars_per_request=data.get("max_bars_per_request", 57600),
         rate_limit_delay=data.get("rate_limit_delay", 0.2),
         max_retries=data.get("max_retries", 3),
         storage_format=storage_format,
         compression=compression,
+        output_formats=output_formats,
     )
 
 
@@ -124,11 +147,18 @@ start_date: "2007-01-01"     # How far back to download
 interval: 1                   # Bar interval
 unit: "Minute"               # Bar unit: Minute, Daily, Weekly
 
-# Storage Format
+# Storage Format (applies to Parquet output)
 # "single"  - One parquet file per symbol (e.g., ES_1min.parquet)
 # "daily"   - Hive-style partitioned by day (e.g., ES/year=2024/month=01/day=15/ES.parquet)
 # "monthly" - Hive-style partitioned by month (e.g., ES/year_month=2024-01/data-0.parquet)
 storage_format: "single"
+
+# Output Formats
+# "parquet" - Native Parquet files (default)
+# "csv"     - Plain CSV .txt files in a plain_data sibling directory
+# "ts_csv"  - TradeStation third-party ASCII files in plain_data
+output_formats:
+  - "parquet"
 
 # Compression Algorithm
 # "zstd"   - Best compression ratio, good speed (recommended)

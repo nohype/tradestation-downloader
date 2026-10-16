@@ -4,7 +4,7 @@ import pytest
 import yaml
 
 from tradestation.config import ConfigurationError, _parse_config, load_config
-from tradestation.models import DownloadConfig
+from tradestation.models import DownloadConfig, OutputFormat
 
 BASE_CONFIG = {
     "tradestation": {
@@ -122,3 +122,74 @@ class TestConfigSymbolsAndCategories:
         assert isinstance(parsed, DownloadConfig)
         assert parsed.symbols == []
         assert parsed.categories == []
+
+    def test_interval_from_config(self, temp_data_dir):
+        """interval is read from the config file."""
+        data = {**BASE_CONFIG, "interval": 30}
+
+        config = _write_and_load(temp_data_dir, data)
+        assert config.interval == 30
+
+        parsed = _parse_config(data)
+        assert parsed.interval == 30
+
+    @pytest.mark.parametrize("interval", [0, -1, 1441])
+    def test_invalid_interval_raises_configuration_error(
+        self, temp_data_dir, interval
+    ):
+        """An out-of-range interval raises ConfigurationError."""
+        data = {**BASE_CONFIG, "interval": interval}
+
+        with pytest.raises(ConfigurationError, match="interval must be between"):
+            _write_and_load(temp_data_dir, data)
+        with pytest.raises(ConfigurationError, match="interval must be between"):
+            _parse_config(data)
+
+    def test_non_integer_interval_raises_configuration_error(self, temp_data_dir):
+        """A non-integer interval raises ConfigurationError."""
+        data = {**BASE_CONFIG, "interval": 5.5}
+
+        with pytest.raises(ConfigurationError, match="interval must be an integer"):
+            _write_and_load(temp_data_dir, data)
+        with pytest.raises(ConfigurationError, match="interval must be an integer"):
+            _parse_config(data)
+
+
+class TestConfigOutputFormats:
+    """Tests for output_formats parsing."""
+
+    def test_default_output_formats(self, temp_data_dir):
+        data = BASE_CONFIG
+
+        config = _write_and_load(temp_data_dir, data)
+        assert config.output_formats == [OutputFormat.PARQUET]
+
+        parsed = _parse_config(data)
+        assert parsed.output_formats == [OutputFormat.PARQUET]
+
+    def test_output_formats_from_config(self, temp_data_dir):
+        data = {**BASE_CONFIG, "output_formats": ["csv", "ts_csv"]}
+
+        config = _write_and_load(temp_data_dir, data)
+        assert config.output_formats == [OutputFormat.CSV, OutputFormat.TS_CSV]
+
+        parsed = _parse_config(data)
+        assert parsed.output_formats == [OutputFormat.CSV, OutputFormat.TS_CSV]
+
+    def test_output_formats_scalar_raises_configuration_error(self, temp_data_dir):
+        """A scalar YAML value for output_formats raises ConfigurationError."""
+        data = {**BASE_CONFIG, "output_formats": "csv"}
+
+        with pytest.raises(ConfigurationError, match="output_formats must be a list"):
+            _write_and_load(temp_data_dir, data)
+        with pytest.raises(ConfigurationError, match="output_formats must be a list"):
+            _parse_config(data)
+
+    def test_invalid_output_format_raises_configuration_error(self, temp_data_dir):
+        """An invalid output format raises ConfigurationError."""
+        data = {**BASE_CONFIG, "output_formats": ["parquet", "invalid"]}
+
+        with pytest.raises(ConfigurationError, match="Invalid output format"):
+            _write_and_load(temp_data_dir, data)
+        with pytest.raises(ConfigurationError, match="Invalid output format"):
+            _parse_config(data)

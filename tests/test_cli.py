@@ -11,6 +11,7 @@ from tradestation.config import ConfigurationError
 from tradestation.models import (
     DEFAULT_SYMBOLS,
     DownloadConfig,
+    OutputFormat,
     get_symbols_by_categories,
 )
 
@@ -32,6 +33,10 @@ def _make_args(**overrides):
         "full": False,
         "storage_format": None,
         "compression": None,
+        "parquet": False,
+        "csv_output": False,
+        "ts_csv_output": False,
+        "interval": None,
         "no_datetime_index": False,
         "workers": 4,
         "verbose": False,
@@ -286,3 +291,137 @@ class TestRunDownload:
         assert result == 1
         mock_csv.assert_called_once()
         mock_ts.assert_called_once()
+
+    def test_interval_flag_overrides_config(self):
+        """--interval overrides the interval from the config file."""
+        config = _make_config(symbols=["@ES"], interval=1)
+        args = _make_args(interval=5)
+
+        with (
+            patch("tradestation.cli.load_config", return_value=config),
+            patch("tradestation.cli.TradeStationDownloader") as mock_downloader,
+        ):
+            mock_downloader.return_value.stats.errors = 0
+
+            result = run_download(args)
+
+        assert result == 0
+        assert config.interval == 5
+        mock_downloader.assert_called_once_with(config)
+
+    def test_interval_flag_default_uses_config(self):
+        """Without --interval, config interval is preserved."""
+        config = _make_config(symbols=["@ES"], interval=15)
+        args = _make_args()
+
+        with (
+            patch("tradestation.cli.load_config", return_value=config),
+            patch("tradestation.cli.TradeStationDownloader") as mock_downloader,
+        ):
+            mock_downloader.return_value.stats.errors = 0
+
+            result = run_download(args)
+
+        assert result == 0
+        assert config.interval == 15
+
+    def test_interval_flag_boundary_values(self):
+        """--interval accepts the valid boundaries 1 and 1440."""
+        assert create_download_parser().parse_args(["--interval", "1"]).interval == 1
+        assert create_download_parser().parse_args(["--interval", "1440"]).interval == 1440
+
+    def test_interval_flag_below_min_rejected(self):
+        """--interval 0 is rejected by argparse."""
+        with pytest.raises(SystemExit):
+            create_download_parser().parse_args(["--interval", "0"])
+
+    def test_interval_flag_above_max_rejected(self):
+        """--interval 1441 is rejected by argparse."""
+        with pytest.raises(SystemExit):
+            create_download_parser().parse_args(["--interval", "1441"])
+
+    def test_interval_flag_non_integer_rejected(self):
+        """--interval abc is rejected by argparse."""
+        with pytest.raises(SystemExit):
+            create_download_parser().parse_args(["--interval", "abc"])
+
+    def test_no_output_format_flags_preserves_config(self):
+        """Without output format flags, config.output_formats is preserved."""
+        config = _make_config(
+            symbols=["@ES"], output_formats=[OutputFormat.CSV, OutputFormat.TS_CSV]
+        )
+        args = _make_args()
+
+        with (
+            patch("tradestation.cli.load_config", return_value=config),
+            patch("tradestation.cli.TradeStationDownloader") as mock_downloader,
+        ):
+            mock_downloader.return_value.stats.errors = 0
+            run_download(args)
+
+        assert config.output_formats == [OutputFormat.CSV, OutputFormat.TS_CSV]
+
+    def test_parquet_flag_only(self):
+        """--parquet sets config.output_formats to [PARQUET]."""
+        config = _make_config(symbols=["@ES"])
+        args = _make_args(parquet=True)
+
+        with (
+            patch("tradestation.cli.load_config", return_value=config),
+            patch("tradestation.cli.TradeStationDownloader") as mock_downloader,
+        ):
+            mock_downloader.return_value.stats.errors = 0
+            run_download(args)
+
+        assert config.output_formats == [OutputFormat.PARQUET]
+
+    def test_csv_flag_only(self):
+        """--csv sets config.output_formats to [CSV]."""
+        config = _make_config(symbols=["@ES"])
+        args = _make_args(csv_output=True)
+
+        with (
+            patch("tradestation.cli.load_config", return_value=config),
+            patch("tradestation.cli.TradeStationDownloader") as mock_downloader,
+        ):
+            mock_downloader.return_value.stats.errors = 0
+            run_download(args)
+
+        assert config.output_formats == [OutputFormat.CSV]
+
+    def test_ts_csv_flag_only(self):
+        """--ts-csv sets config.output_formats to [TS_CSV]."""
+        config = _make_config(symbols=["@ES"])
+        args = _make_args(ts_csv_output=True)
+
+        with (
+            patch("tradestation.cli.load_config", return_value=config),
+            patch("tradestation.cli.TradeStationDownloader") as mock_downloader,
+        ):
+            mock_downloader.return_value.stats.errors = 0
+            run_download(args)
+
+        assert config.output_formats == [OutputFormat.TS_CSV]
+
+    def test_multiple_output_format_flags(self):
+        """Multiple output format flags are all included."""
+        config = _make_config(symbols=["@ES"])
+        args = _make_args(parquet=True, csv_output=True, ts_csv_output=True)
+
+        with (
+            patch("tradestation.cli.load_config", return_value=config),
+            patch("tradestation.cli.TradeStationDownloader") as mock_downloader,
+        ):
+            mock_downloader.return_value.stats.errors = 0
+            run_download(args)
+
+        assert config.output_formats == [
+            OutputFormat.PARQUET,
+            OutputFormat.CSV,
+            OutputFormat.TS_CSV,
+        ]
+
+    def test_default_config_output_formats_is_parquet(self):
+        """A fresh DownloadConfig defaults output_formats to [PARQUET]."""
+        config = _make_config(symbols=["@ES"])
+        assert config.output_formats == [OutputFormat.PARQUET]

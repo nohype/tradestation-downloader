@@ -4,10 +4,9 @@ import logging
 import sys
 from pathlib import Path
 
-import pandas as pd
-
 from . import attributes_ini
 from .config import ConfigurationError, load_config
+from .csv_format import build_plain_csv_output, build_ts_csv_output
 from .metadata import convert_df_timezone
 from .models import validate_symbol
 from .storage import create_storage, detect_storage_format
@@ -20,34 +19,41 @@ def _normalize_symbol(symbol: str) -> str:
     return f"@{symbol.lstrip('@')}"
 
 
-def _setup_export(config_path: str, symbols: list[str] | None):
+def _setup_export(
+    config_path: str,
+    symbols: list[str] | None,
+    config=None,
+    storage=None,
+):
     """Load config, create storage, and resolve target symbols.
 
     Returns (storage, output_dir, targets, data_dir) or None on error.
     """
-    try:
-        config = load_config(config_path)
-    except ConfigurationError as e:
-        logger.error(str(e))
-        return None
+    if config is None:
+        try:
+            config = load_config(config_path)
+        except ConfigurationError as e:
+            logger.error(str(e))
+            return None
 
     data_dir = Path(config.data_dir)
 
-    try:
-        storage_format = detect_storage_format(data_dir)
-    except Exception:
-        storage_format = config.storage_format
+    if storage is None:
+        try:
+            storage_format = detect_storage_format(data_dir)
+        except Exception:
+            storage_format = config.storage_format
 
-    try:
-        storage = create_storage(
-            storage_format,
-            data_dir,
-            compression=config.compression.value,
-            datetime_index=config.datetime_index,
-        )
-    except Exception as e:
-        logger.error("Failed to create storage: %s", e)
-        return None
+        try:
+            storage = create_storage(
+                storage_format,
+                data_dir,
+                compression=config.compression.value,
+                datetime_index=config.datetime_index,
+            )
+        except Exception as e:
+            logger.error("Failed to create storage: %s", e)
+            return None
 
     if symbols is not None:
         for requested in symbols:
@@ -67,10 +73,16 @@ def _setup_export(config_path: str, symbols: list[str] | None):
         for requested in symbols:
             normalized = _normalize_symbol(requested)
             if normalized not in normalized_available:
-                logger.error("No data found for symbol: %s", requested)
-                print(f"No data found for symbol: {requested}", file=sys.stderr)
-                return None
+                logger.warning("No data found for symbol: %s; skipping", requested)
+                continue
             targets.append(normalized_available[normalized])
+
+    if not targets:
+        missing = symbols if symbols is not None else []
+        msg = f"No requested symbols have stored data in {data_dir}: {missing}"
+        logger.error(msg)
+        print(msg, file=sys.stderr)
+        return None
 
     output_dir = data_dir.parent / "plain_data"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -78,78 +90,18 @@ def _setup_export(config_path: str, symbols: list[str] | None):
     return storage, output_dir, targets, data_dir
 
 
-def _prepare_frame(df: pd.DataFrame) -> pd.DataFrame:
-    """Ensure a datetime column and add formatted Date/Time columns."""
-    if isinstance(df.index, pd.DatetimeIndex):
-        df = df.reset_index(names=["datetime"])
 
-    df["Date"] = df["datetime"].dt.strftime("%m/%d/%Y")
-    df["Time"] = df["datetime"].dt.strftime("%H:%M")
-    return df
-
-
-def _build_csv_output(df: pd.DataFrame):
-    """Build (out_df, output_columns) for the standard CSV export format."""
-    df = _prepare_frame(df)
-
-    output_columns = ["Date", "Time", "Open", "High", "Low", "Close"]
-    rename_map = {
-        "open": "Open",
-        "high": "High",
-        "low": "Low",
-        "close": "Close",
-    }
-    if "up_volume" in df.columns and "down_volume" in df.columns:
-        rename_map["up_volume"] = "Up"
-        rename_map["down_volume"] = "Down"
-        output_columns.extend(["Up", "Down"])
-        if "up_ticks" in df.columns and "down_ticks" in df.columns:
-            rename_map["up_ticks"] = "Upticks"
-            rename_map["down_ticks"] = "Downticks"
-            output_columns.extend(["Upticks", "Downticks"])
-    elif "volume" in df.columns:
-        rename_map["volume"] = "Vol"
-        output_columns.append("Vol")
-
-    if "open_interest" in df.columns:
-        rename_map["open_interest"] = "OpenInterest"
-        output_columns.append("OpenInterest")
-
-    if "total_ticks" in df.columns:
-        rename_map["total_ticks"] = "TotalTicks"
-        output_columns.append("TotalTicks")
-
-    return df.rename(columns=rename_map)[output_columns], output_columns
-
-
-def _build_ts_csv_output(df: pd.DataFrame):
-    """Build (out_df, output_columns) for the TradeStation ASCII format."""
-    df = _prepare_frame(df)
-
-    output_columns = ["Date", "Time", "Open", "High", "Low", "Close", "Volume"]
-    rename_map = {
-        "open": "Open",
-        "high": "High",
-        "low": "Low",
-        "close": "Close",
-    }
-    if "up_volume" in df.columns and "down_volume" in df.columns:
-        df["Volume"] = (df["up_volume"].fillna(0) + df["down_volume"].fillna(0)).astype("Int64")
-    elif "volume" in df.columns:
-        df["Volume"] = df["volume"].fillna(0).astype("Int64")
-    else:
-        df["Volume"] = 0
-
-    if "open_interest" in df.columns:
-        rename_map["open_interest"] = "OpenInt"
-        output_columns.append("OpenInt")
-
-    return df.rename(columns=rename_map)[output_columns], output_columns
-
-
-def _run_export(config_path: str, symbols: list[str] | None, build_output, filename, label: str) -> int:
+def _run_export(
+    config_path: str,
+    symbols: list[str] | None,
+    build_output,
+    filename,
+    label: str,
+    config=None,
+    storage=None,
+) -> int:
     """Shared export loop. Returns 0 success, 1 error."""
-    setup = _setup_export(config_path, symbols)
+    setup = _setup_export(config_path, symbols, config=config, storage=storage)
     if setup is None:
         return 1
     storage, output_dir, targets, _data_dir = setup
@@ -175,18 +127,30 @@ def _run_export(config_path: str, symbols: list[str] | None, build_output, filen
     return 0
 
 
-def run_export_csv(config_path: str, symbols: list[str] | None = None) -> int:
+def run_export_csv(
+    config_path: str,
+    symbols: list[str] | None = None,
+    config=None,
+    storage=None,
+) -> int:
     """Export downloaded parquet data to CSV .txt files. Returns 0 success, 1 error."""
     return _run_export(
         config_path,
         symbols,
-        _build_csv_output,
+        build_plain_csv_output,
         lambda symbol: f"{symbol}.txt",
         "CSV",
+        config=config,
+        storage=storage,
     )
 
 
-def run_export_ts_csv(config_path: str, symbols: list[str] | None = None) -> int:
+def run_export_ts_csv(
+    config_path: str,
+    symbols: list[str] | None = None,
+    config=None,
+    storage=None,
+) -> int:
     """Export to TradeStation third-party ASCII format (_ts.txt). Returns 0 success, 1 error.
 
     Date/Time are written in the exchange timezone (matching SESSION 1 in
@@ -194,7 +158,7 @@ def run_export_ts_csv(config_path: str, symbols: list[str] | None = None) -> int
     plain_data/attributes.ini. metadata.json is regenerated via --metadata when
     it is missing or lacks data needed for the exported symbols.
     """
-    setup = _setup_export(config_path, symbols)
+    setup = _setup_export(config_path, symbols, config=config, storage=storage)
     if setup is None:
         return 1
     storage, output_dir, targets, data_dir = setup
@@ -223,7 +187,7 @@ def run_export_ts_csv(config_path: str, symbols: list[str] | None = None) -> int
             continue
 
         local_df = convert_df_timezone(df, timezone)
-        out_df, output_columns = _build_ts_csv_output(local_df)
+        out_df, output_columns = build_ts_csv_output(local_df)
 
         path = output_dir / f"{symbol}_ts.txt"
         with path.open("w", encoding="utf-8", newline="") as f:
