@@ -3,10 +3,14 @@ Command-line interface for TradeStation data downloader.
 """
 
 import argparse
+import calendar
 import logging
+import re
 import sys
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 
-from .config import ConfigurationError, load_config
+from .config import ConfigurationError, load_config, load_credentials
 from .downloader import TradeStationDownloader
 from .models import (
     DEFAULT_SYMBOLS,
@@ -58,6 +62,7 @@ Examples:
   %(prog)s --list-categories        List symbol categories
   %(prog)s --all-categories         Download symbols from all configured categories
   %(prog)s -s @ES --rollcheck       Check whether to roll each symbol's front contract
+  %(prog)s orders --help            Orders mode: download account order history to CSV
 """,
     )
 
@@ -183,6 +188,120 @@ Examples:
         default=4,
         metavar="N",
         help="Number of parallel download workers (default: 4, use 1 for sequential)",
+    )
+
+    return parser
+
+
+def _make_orders_date_type(flag: str):
+    """Return an argparse type callable for --start or --end dates."""
+
+    def parse(value: str) -> date:
+        lowered = value.lower()
+        if lowered == "earliest":
+            if flag != "start":
+                raise argparse.ArgumentTypeError(
+                    f"'earliest' is only valid for --start, got {value!r}"
+                )
+            return datetime.now(UTC).date() - timedelta(days=729)
+        if lowered == "latest":
+            if flag != "end":
+                raise argparse.ArgumentTypeError(
+                    f"'latest' is only valid for --end, got {value!r}"
+                )
+            return datetime.now(UTC).date()
+        valid = "YYYY-MM-DD, YYYY-MM, YYYY" + (
+            ", or 'earliest'" if flag == "start" else ", or 'latest'"
+        )
+        try:
+            m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", value)
+            if m:
+                return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            m = re.fullmatch(r"(\d{4})-(\d{2})", value)
+            if m:
+                year, month = int(m.group(1)), int(m.group(2))
+                if flag == "start":
+                    return date(year, month, 1)
+                return date(year, month, calendar.monthrange(year, month)[1])
+            m = re.fullmatch(r"(\d{4})", value)
+            if m:
+                year = int(m.group(1))
+                return date(year, 1, 1) if flag == "start" else date(year, 12, 31)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                f"invalid {flag} date {value!r}. Expected one of: {valid}"
+            ) from exc
+        raise argparse.ArgumentTypeError(
+            f"invalid {flag} date {value!r}. Expected one of: {valid}"
+        )
+
+    return parse
+
+
+def create_orders_parser() -> argparse.ArgumentParser:
+    """Create argument parser for the 'orders' sub-mode."""
+    parser = argparse.ArgumentParser(
+        prog="tradestation-download orders",
+        description="Download historical orders for the logged-in TradeStation account to CSV",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s                                  Download all available order history
+  %(prog)s -s 2024-01-01 -e 2025-01-31      Download orders for a date range
+  %(prog)s -s 2024 -e 2024-06               Year / year-month date forms
+  %(prog)s --full -o my_orders.csv          Discard cache, re-download, custom output
+  %(prog)s -a 12345678 -s 2025-01-01 -e latest
+  %(prog)s --include-open                   Also include still-open orders
+""",
+    )
+
+    parser.add_argument(
+        "-c", "--config",
+        default="config.yaml",
+        metavar="FILE",
+        help="Path to configuration file (default: config.yaml)",
+    )
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="Discard existing local order cache and re-download everything",
+    )
+    parser.add_argument(
+        "-s", "--start",
+        type=_make_orders_date_type("start"),
+        default="earliest",
+        metavar="DATE",
+        help="Start date: YYYY-MM-DD, YYYY-MM, YYYY, or 'earliest' "
+             "(default: earliest, i.e. today minus 729 days)",
+    )
+    parser.add_argument(
+        "-e", "--end",
+        type=_make_orders_date_type("end"),
+        default="latest",
+        metavar="DATE",
+        help="End date: YYYY-MM-DD, YYYY-MM, YYYY, or 'latest' (default: latest)",
+    )
+    parser.add_argument(
+        "-o", "--out",
+        default=None,
+        metavar="FILE",
+        help="Output CSV path (default: orders/<account>_<start>_<end>.csv)",
+    )
+    parser.add_argument(
+        "--include-open",
+        action="store_true",
+        help="Include open orders (default: only closed orders are downloaded)",
+    )
+    parser.add_argument(
+        "-a", "--account",
+        default=None,
+        metavar="ID",
+        help="TradeStation account ID (required when the login has multiple accounts)",
+    )
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Enable verbose (debug) logging",
     )
 
     return parser
@@ -318,8 +437,70 @@ def run_download(args: argparse.Namespace) -> int:
         return 1
 
 
+def run_orders_mode(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """Run the 'orders' sub-mode."""
+    from .orders import (
+        ORDERS_ROOT,
+        AccountResolutionError,
+        OrdersError,
+        resolve_account_id,
+        run_orders,
+    )
+
+    start: date = args.start
+    end: date = args.end
+    if start > end:
+        parser.error(
+            f"--start ({start.isoformat()}) must be on or before "
+            f"--end ({end.isoformat()})"
+        )
+
+    try:
+        try:
+            config = load_credentials(args.config)
+        except ConfigurationError as e:
+            logger.error(str(e))
+            return 1
+
+        from .auth import AuthenticationError, TradeStationAuth
+        auth = TradeStationAuth(
+            config.client_id, config.client_secret, config.refresh_token
+        )
+
+        try:
+            account_id = resolve_account_id(auth, args.account)
+        except (AccountResolutionError, AuthenticationError, OrdersError) as e:
+            logger.error(str(e))
+            return 1
+
+        if args.out:
+            output_path = Path(args.out)
+        else:
+            output_path = ORDERS_ROOT / f"{account_id}_{start.isoformat()}_{end.isoformat()}.csv"
+        logger.info("Date range: %s to %s", start.isoformat(), end.isoformat())
+        if args.include_open:
+            logger.info("Including open orders")
+        try:
+            return run_orders(
+                config, auth, account_id, start, end,
+                full=args.full, include_open=args.include_open,
+                output_path=output_path,
+            )
+        except Exception as e:
+            logger.error("Unexpected error: %s", e)
+            if args.verbose:
+                raise
+            return 1
+    except KeyboardInterrupt:
+        logger.info("\nOrders download interrupted by user")
+        return 130
+
+
 def main_download() -> None:
-    """Entry point for download CLI."""
+    """Entry point for download CLI; also dispatches 'orders' mode."""
+    if sys.argv[1:2] == ["orders"]:
+        sys.exit(main_orders())
+
     parser = create_download_parser()
     args = parser.parse_args()
 
@@ -327,6 +508,17 @@ def main_download() -> None:
         logging.getLogger().setLevel(logging.DEBUG)
 
     sys.exit(run_download(args))
+
+
+def main_orders() -> int:
+    """Entry point for the 'orders' sub-mode."""
+    parser = create_orders_parser()
+    args = parser.parse_args(sys.argv[2:])
+
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+
+    return run_orders_mode(parser, args)
 
 
 def main_auth() -> None:

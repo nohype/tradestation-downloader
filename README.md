@@ -217,6 +217,43 @@ data/
     └── ...
 ```
 
+## Orders Mode
+
+Download historical orders for the logged-in TradeStation account to a CSV file. `orders` must be the first argument after the program name; only the `tradestation:` credentials section of `config.yaml` is used (symbols, `data_dir`, storage format, etc. are ignored). Orders are cached incrementally as Parquet under `orders/cache/<account_id>/`, so repeat runs only download not-yet-cached data.
+
+```bash
+tradestation-download orders                          # all history, auto account
+tradestation-download orders -s 2024-01-01 -e 2025-01-31
+tradestation-download orders -s 2024 -e 2024-06       # year / year-month forms
+tradestation-download orders --full -o my_orders.csv
+tradestation-download orders -a 12345678 -s 2025-01-01 -e latest
+tradestation-download orders --include-open            # also include still-open orders
+```
+
+| Flag | Long | Default | Description |
+|------|------|---------|-------------|
+| `-c` | `--config` | `config.yaml` | Path to configuration file |
+| | `--full` | off | Discard existing local order cache and re-download everything |
+| | `--include-open` | off | Include open orders (default: only closed orders are downloaded) |
+| `-s` | `--start` | `earliest` (today − 729 days) | Start date: `YYYY-MM-DD`, `YYYY-MM`, `YYYY`, or `earliest` |
+| `-e` | `--end` | `latest` (today) | End date: `YYYY-MM-DD`, `YYYY-MM`, `YYYY`, or `latest` |
+| `-o` | `--out` | `orders/<account>_<start>_<end>.csv` | Output CSV path |
+| `-a` | `--account` | auto (single account) | TradeStation account ID (required with multiple accounts) |
+| `-v` | `--verbose` | off | Enable verbose (debug) logging |
+
+**Output and cache layout:**
+
+```
+orders/
+├── cache/
+│   └── <account_id>/
+│       ├── orders.parquet        # incremental order cache
+│       └── coverage.json         # which span has been fetched
+└── <account_id>_<start>_<end>.csv   # e.g. 12345678_2025-01-01_2026-10-17.csv
+```
+
+The CSV is generated from the cache for the requested `--start`/`--end` span and always replaced. Note the API only provides roughly the last 730 days of order history.
+
 ## Loading Data
 
 ```python

@@ -3,7 +3,12 @@
 import pytest
 import yaml
 
-from tradestation.config import ConfigurationError, _parse_config, load_config
+from tradestation.config import (
+    ConfigurationError,
+    _parse_config,
+    load_config,
+    load_credentials,
+)
 from tradestation.models import DownloadConfig, OutputFormat
 
 BASE_CONFIG = {
@@ -193,3 +198,97 @@ class TestConfigOutputFormats:
             _write_and_load(temp_data_dir, data)
         with pytest.raises(ConfigurationError, match="Invalid output format"):
             _parse_config(data)
+
+
+def _write_credentials_file(temp_data_dir, data, filename="config.yaml"):
+    """Write data to a YAML file and load credentials from it."""
+    config_path = temp_data_dir / filename
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f)
+    return load_credentials(str(config_path))
+
+
+class TestLoadCredentials:
+    """Tests for load_credentials, which only validates the 'tradestation' section."""
+
+    def test_valid_credentials_return_defaults_elsewhere(self, temp_data_dir):
+        """Only credentials are populated; all other fields keep defaults."""
+        config = _write_credentials_file(temp_data_dir, BASE_CONFIG)
+
+        assert isinstance(config, DownloadConfig)
+        assert config == DownloadConfig(
+            client_id="client_id",
+            client_secret="client_secret",
+            refresh_token="refresh_token",
+        )
+
+    def test_garbage_non_credential_sections_ignored(self, temp_data_dir):
+        """Malformed non-credential sections are ignored entirely."""
+        data = {
+            **BASE_CONFIG,
+            "symbols": "notalist",
+            "storage_format": "bogus",
+            "data_dir": 123,
+            "categories": ["indexx"],
+            "output_formats": "csv",
+            "interval": 0,
+        }
+
+        config = _write_credentials_file(temp_data_dir, data)
+        assert isinstance(config, DownloadConfig)
+        assert config.client_id == "client_id"
+        assert config.client_secret == "client_secret"
+        assert config.refresh_token == "refresh_token"
+
+    def test_missing_file_raises_configuration_error(self, temp_data_dir):
+        """A missing config file raises ConfigurationError."""
+        with pytest.raises(ConfigurationError, match="Configuration file not found"):
+            load_credentials(str(temp_data_dir / "nonexistent.yaml"))
+
+    def test_missing_tradestation_section_raises_configuration_error(
+        self, temp_data_dir
+    ):
+        """A config without a 'tradestation' section raises ConfigurationError."""
+        with pytest.raises(ConfigurationError, match="Missing 'tradestation' section"):
+            _write_credentials_file(temp_data_dir, {"symbols": ["@ES"]})
+
+    def test_non_mapping_tradestation_section_raises_configuration_error(
+        self, temp_data_dir
+    ):
+        """A non-mapping 'tradestation' section raises ConfigurationError."""
+        data = {"tradestation": "notamapping"}
+
+        with pytest.raises(
+            ConfigurationError, match="'tradestation' section must be a mapping"
+        ):
+            _write_credentials_file(temp_data_dir, data)
+
+    def test_missing_credential_field_raises_configuration_error(self, temp_data_dir):
+        """A missing credential field raises ConfigurationError naming the field."""
+        data = {
+            "tradestation": {
+                "client_id": "client_id",
+                "refresh_token": "refresh_token",
+            }
+        }
+
+        with pytest.raises(ConfigurationError, match="client_secret"):
+            _write_credentials_file(temp_data_dir, data)
+
+    def test_invalid_yaml_raises_configuration_error(self, temp_data_dir):
+        """Unparseable YAML raises ConfigurationError."""
+        config_path = temp_data_dir / "config.yaml"
+        config_path.write_text("tradestation: [unclosed\n", encoding="utf-8")
+
+        with pytest.raises(ConfigurationError, match="Invalid YAML"):
+            load_credentials(str(config_path))
+
+    def test_explicit_config_path_honored(self, temp_data_dir):
+        """A non-default config filename is honored via config_path."""
+        config = _write_credentials_file(
+            temp_data_dir, BASE_CONFIG, filename="credentials.yaml"
+        )
+
+        assert config.client_id == "client_id"
+        assert config.client_secret == "client_secret"
+        assert config.refresh_token == "refresh_token"

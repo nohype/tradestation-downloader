@@ -24,6 +24,7 @@ data/
 minute_data/
 minute_plain_data/
 plain_data/
+orders/
 *.parquet
 
 # Config with secrets

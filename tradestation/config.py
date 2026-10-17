@@ -44,17 +44,61 @@ def load_config(config_path: str = "config.yaml") -> DownloadConfig:
     return _parse_config(data)
 
 
-def _parse_config(data: dict) -> DownloadConfig:
-    """Parse configuration dictionary into DownloadConfig."""
-    # Validate required fields
-    if "tradestation" not in data:
-        raise ConfigurationError("Missing 'tradestation' section in config")
+def load_credentials(config_path: str = "config.yaml") -> DownloadConfig:
+    """
+    Load only TradeStation API credentials from a YAML file.
 
+    Unlike load_config(), this validates only the 'tradestation' section;
+    all other fields keep their DownloadConfig defaults and the user's
+    market-data settings are neither validated nor read.
+
+    Args:
+        config_path: Path to the configuration file
+
+    Returns:
+        DownloadConfig instance with credentials populated and defaults elsewhere
+
+    Raises:
+        ConfigurationError: If the config file is missing or credentials are invalid
+    """
+    config_file = Path(config_path)
+
+    if not config_file.exists():
+        raise ConfigurationError(
+            f"Configuration file not found: {config_path}\n"
+            "Please create a config.yaml file with your TradeStation API credentials.\n"
+            "See config.yaml.template for an example."
+        )
+
+    try:
+        with open(config_file, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        raise ConfigurationError(f"Invalid YAML in {config_path}: {e}") from e
+
+    client_id, client_secret, refresh_token = _parse_tradestation_credentials(data)
+    return DownloadConfig(
+        client_id=client_id, client_secret=client_secret, refresh_token=refresh_token
+    )
+
+
+def _parse_tradestation_credentials(data: dict | None) -> tuple[str, str, str]:
+    """Validate and return credentials from the 'tradestation' section."""
+    if not isinstance(data, dict) or "tradestation" not in data:
+        raise ConfigurationError("Missing 'tradestation' section in config")
     ts_config = data["tradestation"]
+    if not isinstance(ts_config, dict):
+        raise ConfigurationError("'tradestation' section must be a mapping")
     required_fields = ["client_id", "client_secret", "refresh_token"]
     missing = [f for f in required_fields if f not in ts_config]
     if missing:
         raise ConfigurationError(f"Missing required fields in tradestation config: {missing}")
+    return (ts_config["client_id"], ts_config["client_secret"], ts_config["refresh_token"])
+
+
+def _parse_config(data: dict) -> DownloadConfig:
+    """Parse configuration dictionary into DownloadConfig."""
+    client_id, client_secret, refresh_token = _parse_tradestation_credentials(data)
 
     # Get symbols and categories
     symbols = data.get("symbols") or []
@@ -109,9 +153,9 @@ def _parse_config(data: dict) -> DownloadConfig:
         )
 
     return DownloadConfig(
-        client_id=ts_config["client_id"],
-        client_secret=ts_config["client_secret"],
-        refresh_token=ts_config["refresh_token"],
+        client_id=client_id,
+        client_secret=client_secret,
+        refresh_token=refresh_token,
         data_dir=data.get("data_dir", "./data"),
         start_date=data.get("start_date", "2007-01-01"),
         symbols=symbols,

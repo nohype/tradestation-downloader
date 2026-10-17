@@ -22,6 +22,7 @@ tradestation/
 ├── auth_setup.py     # Interactive OAuth2 setup wizard
 ├── storage.py        # StorageBackend ABC + SingleFile/Daily/Monthly implementations
 ├── downloader.py     # TradeStationDownloader - core download logic
+├── orders.py         # Orders mode: fetch, incremental parquet cache, CSV export
 ├── config.py         # Configuration loading from YAML
 └── cli.py            # Command-line interface
 
@@ -54,6 +55,11 @@ tradestation-download --csv --ts-csv        # Write both CSV formats in one run
 tradestation-download --list-symbols          # List all symbols
 tradestation-download --list-categories       # List symbol categories
 tradestation-download --category index        # Download category
+
+# Orders mode (historical orders to CSV)
+tradestation-download orders [-s START] [-e END] [-a ACCOUNT] [-o OUT] [--full] [--include-open]
+tradestation-download orders -s 2024-01-01 -e 2025-01-31
+tradestation-download orders -a 12345678 -s 2025-01-01 -e latest
 ```
 
 ## Architecture
