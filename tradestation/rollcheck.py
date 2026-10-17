@@ -200,6 +200,13 @@ def bar_for_day(bars: list[dict], timestamp: datetime) -> dict | None:
     return None
 
 
+def _roll_deadline(expiry: date, fnd: date | None) -> tuple[date, str]:
+    """Effective roll deadline: the earlier of expiry and first notice date."""
+    if fnd is not None and fnd < expiry:
+        return fnd, "FND"
+    return expiry, "ED"
+
+
 def check_symbol(
     auth: TradeStationAuth,
     symbol: str,
@@ -225,33 +232,49 @@ def check_symbol(
         )
         return row
 
-    row.current, row.next = chain[0][0], chain[1][0]
-    row.current_expiry = chain[0][1].date()
-    row.next_expiry = chain[1][1].date()
-
+    # One quote call for the whole chain: the v3 FirstNoticeDate can precede
+    # expiration by weeks for physically delivered roots, and a contract whose
+    # effective deadline has passed is dead for trading even if its
+    # ExpirationDate is still ahead.
     try:
-        quotes = fetch_quotes(auth, [row.current])
-        fnd = _parse_datetime((quotes.get(row.current) or {}).get("FirstNoticeDate"))
-        row.current_fnd = fnd.date() if fnd else None
+        quotes = fetch_quotes(auth, [name for name, _ in chain])
     except RollcheckError as e:
         row.warning = True
+        row.warnings.append(f"{symbol}: quote lookup failed for {root} chain: {e}")
+        quotes = {}
+
+    alive = []
+    for name, expiry in chain:
+        fnd = _parse_datetime((quotes.get(name) or {}).get("FirstNoticeDate"))
+        fnd_date = fnd.date() if fnd else None
+        deadline, _ = _roll_deadline(expiry.date(), fnd_date)
+        if deadline >= date.today():
+            alive.append((name, expiry, fnd_date))
+
+    if len(alive) < 2:
+        row.warning = True
+        if alive:
+            row.current = alive[0][0]
+            row.current_expiry = alive[0][1].date()
+            row.current_fnd = alive[0][2]
         row.warnings.append(
-            f"{symbol}: first notice date lookup failed for {row.current}: {e}"
+            f"{symbol}: fewer than 2 tradable contracts remaining in root {root} "
+            f"({len(alive)} alive of {len(chain)} found)"
         )
+        return row
+
+    row.current, row.next = alive[0][0], alive[1][0]
+    row.current_expiry = alive[0][1].date()
+    row.next_expiry = alive[1][1].date()
+    row.current_fnd = alive[0][2]
 
     # Roll by whichever deadline comes first: expiration (ED) or first notice
     # (FND). If one is missing (e.g. no FND for cash-settled contracts), the
     # other is used.
-    dated = [
-        (d, kind)
-        for d, kind in ((row.current_expiry, "ED"), (row.current_fnd, "FND"))
-        if d is not None
-    ]
-    if dated:
-        row.roll_date, row.roll_date_kind = min(dated)
-        row.days_to_expiry = (row.roll_date - date.today()).days
-        if row.days_to_expiry <= roll_days:
-            row.rollover = "YES"
+    row.roll_date, row.roll_date_kind = _roll_deadline(row.current_expiry, row.current_fnd)
+    row.days_to_expiry = (row.roll_date - date.today()).days
+    if row.days_to_expiry <= roll_days:
+        row.rollover = "YES"
 
     try:
         current_bars = fetch_daily_bars(auth, row.current)

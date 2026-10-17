@@ -468,11 +468,14 @@ class TestFirstNoticeDate:
         assert code == 0
         assert "ROLL -> ESH26" in out
 
-    def test_passed_fnd_triggers_roll(self, capsys):
-        # FND already past (negative days): still forces ROLL
+    def test_passed_fnd_skips_contract(self, capsys):
+        # FND already past (negative days): the contract is dead for trading
+        # and skipped entirely; the next two contracts become current/next
         code, out = _run(capsys, chains={"ES": _es_chain()}, quotes=self._es_quotes(-2))
         assert code == 0
-        assert "ROLL -> ESH26" in out
+        cells = _table_cells(out, "@ES")
+        assert cells[1].startswith("ESH26")
+        assert cells[2].startswith("ESM26")
 
     def test_quote_lookup_failure_warns_and_uses_expiry(self, capsys):
         base_get = _make_get(chains={"ES": _es_chain()})
@@ -489,7 +492,7 @@ class TestFirstNoticeDate:
             code = run_rollcheck(_make_config())
         out = capsys.readouterr().out
         assert code == 0
-        assert "first notice date lookup failed" in out
+        assert "quote lookup failed for ES chain" in out
         assert "(!)" in out
         assert "{ED}" in out
         assert "keep ESZ25" in out
@@ -518,6 +521,88 @@ class TestFirstNoticeDate:
     def test_column_header_is_exp_fnd(self, capsys):
         _, out = _run(capsys, chains={"ES": _es_chain()})
         assert "EXP/FND" in out
+
+
+class TestDeadContractFilter:
+    """Contracts whose effective roll deadline (earlier of ED/FND) has passed
+    are excluded from current/next selection."""
+
+    def _gc_chain(self):
+        return [
+            _contract("GCV26", _expiry(30)),
+            _contract("GCX26", _expiry(60)),
+            _contract("GCZ26", _expiry(90)),
+        ]
+
+    def test_dead_front_contract_skipped(self, capsys):
+        quotes = {
+            "GCV26": _quote("GCV26", fnd=_expiry_iso(-2)),
+            "GCX26": _quote("GCX26", fnd=_expiry_iso(20)),
+        }
+        code, out = _run(
+            capsys,
+            chains={"GC": self._gc_chain()},
+            quotes=quotes,
+            config=_make_config(symbols=["@GC"]),
+        )
+        assert code == 0
+        cells = _table_cells(out, "@GC")
+        assert cells[1].startswith("GCX26")
+        assert cells[2].startswith("GCZ26")
+        assert int(cells[6]) > 0
+
+    def test_multiple_consecutive_dead_contracts_skipped(self, capsys):
+        chain = [
+            _contract("GCV26", _expiry(30)),
+            _contract("GCX26", _expiry(60)),
+            _contract("GCZ26", _expiry(90)),
+            _contract("GCG27", _expiry(150)),
+        ]
+        quotes = {
+            "GCV26": _quote("GCV26", fnd=_expiry_iso(-5)),
+            "GCX26": _quote("GCX26", fnd=_expiry_iso(-1)),
+        }
+        code, out = _run(
+            capsys,
+            chains={"GC": chain},
+            quotes=quotes,
+            config=_make_config(symbols=["@GC"]),
+        )
+        assert code == 0
+        cells = _table_cells(out, "@GC")
+        assert cells[1].startswith("GCZ26")
+        assert cells[2].startswith("GCG27")
+
+    def test_fewer_than_two_alive_warns_with_counts(self, capsys):
+        chain = self._gc_chain()
+        quotes = {
+            "GCV26": _quote("GCV26", fnd=_expiry_iso(-2)),
+            "GCZ26": _quote("GCZ26", fnd=_expiry_iso(-1)),
+        }
+        code, out = _run(
+            capsys,
+            chains={"GC": chain},
+            quotes=quotes,
+            config=_make_config(symbols=["@GC"]),
+        )
+        assert code == 0
+        assert "fewer than 2 tradable contracts" in out
+        assert "1 alive of 3" in out
+        cells = _table_cells(out, "@GC")
+        assert cells[1].startswith("GCX26")
+        assert cells[2] == "n/a"
+
+    def test_missing_fnd_keeps_contract_alive_by_expiry(self, capsys):
+        # No FND for any contract (cash-settled style): selection by expiry only
+        code, out = _run(
+            capsys,
+            chains={"GC": self._gc_chain()},
+            config=_make_config(symbols=["@GC"]),
+        )
+        assert code == 0
+        cells = _table_cells(out, "@GC")
+        assert cells[1].startswith("GCV26")
+        assert cells[2].startswith("GCX26")
 
 
 class TestDescribeContract:
