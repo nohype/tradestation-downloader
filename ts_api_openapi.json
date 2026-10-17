@@ -987,11 +987,31 @@
           {
             "name": "since",
             "in": "query",
-            "description": "Historical orders since date. For example `\"2006-01-13\",\"01-13-2006\",\"2006/01/13\",\"01/13/2006\"`. Limited to 90 days prior to the current date.",
+            "description": "Historical orders since date. For example `\"2026-01-13\",\"01-13-2026\",\"2026/01/13\",\"01/13/2026\"`. Limited to 730 days prior to the current date.\n\nNote: Although this endpoint allows historical orders to be requested for up to two years, the simulated (SIM) environment does not yet provide a full two years of history. It currently provides a near two-year history, with simulated historical orders available back to around early November 2024. As a result, a full two years of simulated historical orders will not be available until around early November 2026, after which access will be limited to the most recent two years. A full two years of historical orders can be accessed in the Live environment.",
             "required": true,
             "schema": {
               "type": "string",
-              "example": "2006-01-13"
+              "example": "2026-01-13"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Filter orders by status. Multiple statuses can be specified, comma separated. Valid values are Open, Filled, Cancelled (or Canceled), Rejected.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "example": "Open,Filled,Rejected"
+            }
+          },
+          {
+            "name": "symbol",
+            "in": "query",
+            "description": "Filter orders by symbol. Multiple symbols can be specified, comma separated. For example `\"MSFT,AAPL,GOOG,AAPL 251031C270\"`.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "example": "MSFT,GOOG"
             }
           },
           {
@@ -1253,19 +1273,19 @@
         "x-codeSamples": [
           {
             "lang": "Shell",
-            "source": "curl --request GET \\\n  --url 'https://api.tradestation.com/v3/brokerage/accounts/61999124,68910124/historicalorders?since=2006-01-13' \\\n  --header 'Authorization: Bearer TOKEN'"
+            "source": "curl --request GET \\\n  --url 'https://api.tradestation.com/v3/brokerage/accounts/61999124,68910124/historicalorders?since=2026-01-13' \\\n  --header 'Authorization: Bearer TOKEN'"
           },
           {
             "lang": "Node",
-            "source": "const request = require('request');\n\nconst options = {\n  method: 'GET',\n  url: 'https://api.tradestation.com/v3/brokerage/accounts/61999124,68910124/historicalorders',\n  qs: {since: '2006-01-13'},\n  headers: {Authorization: 'Bearer TOKEN'}\n};\n\nrequest(options, function (error, response, body) {\n  if (error) throw new Error(error);\n\n  console.log(body);\n});\n"
+            "source": "const request = require('request');\n\nconst options = {\n  method: 'GET',\n  url: 'https://api.tradestation.com/v3/brokerage/accounts/61999124,68910124/historicalorders',\n  qs: {since: '2026-01-13'},\n  headers: {Authorization: 'Bearer TOKEN'}\n};\n\nrequest(options, function (error, response, body) {\n  if (error) throw new Error(error);\n\n  console.log(body);\n});\n"
           },
           {
             "lang": "Python",
-            "source": "import requests\n\nurl = \"https://api.tradestation.com/v3/brokerage/accounts/61999124,68910124/historicalorders\"\n\nquerystring = {\"since\":\"2006-01-13\"}\n\nheaders = {\"Authorization\": \"Bearer TOKEN\"}\n\nresponse = requests.request(\"GET\", url, headers=headers, params=querystring)\n\nprint(response.text)"
+            "source": "import requests\n\nurl = \"https://api.tradestation.com/v3/brokerage/accounts/61999124,68910124/historicalorders\"\n\nquerystring = {\"since\":\"2026-01-13\"}\n\nheaders = {\"Authorization\": \"Bearer TOKEN\"}\n\nresponse = requests.request(\"GET\", url, headers=headers, params=querystring)\n\nprint(response.text)"
           },
           {
             "lang": "C#",
-            "source": "var client = new HttpClient();\nvar request = new HttpRequestMessage\n{\n    Method = HttpMethod.Get,\n    RequestUri = new Uri(\"https://api.tradestation.com/v3/brokerage/accounts/61999124,68910124/historicalorders?since=2006-01-13\"),\n    Headers =\n    {\n        { \"Authorization\", \"Bearer TOKEN\" },\n    },\n};\nusing (var response = await client.SendAsync(request))\n{\n    response.EnsureSuccessStatusCode();\n    var body = await response.Content.ReadAsStringAsync();\n    Console.WriteLine(body);\n}"
+            "source": "var client = new HttpClient();\nvar request = new HttpRequestMessage\n{\n    Method = HttpMethod.Get,\n    RequestUri = new Uri(\"https://api.tradestation.com/v3/brokerage/accounts/61999124,68910124/historicalorders?since=2026-01-13\"),\n    Headers =\n    {\n        { \"Authorization\", \"Bearer TOKEN\" },\n    },\n};\nusing (var response = await client.SendAsync(request))\n{\n    response.EnsureSuccessStatusCode();\n    var body = await response.Content.ReadAsStringAsync();\n    Console.WriteLine(body);\n}"
           }
         ]
       }
@@ -1302,11 +1322,11 @@
           {
             "name": "since",
             "in": "query",
-            "description": "Historical orders since date. For example `\"2006-01-13\",\"01-13-2006\",\"2006/01/13\",\"01/13/2006\"`. Limited to 90 days prior to the current date.",
+            "description": "Historical orders since date. For example `\"2026-01-13\",\"01-13-2026\",\"2026/01/13\",\"01/13/2026\"`. Limited to 730 days prior to the current date.\n\nNote: Although this endpoint allows historical orders to be requested for up to two years, the simulated (SIM) environment does not yet provide a full two years of history. It currently provides a near two-year history, with simulated historical orders available back to around early November 2024. As a result, a full two years of simulated historical orders will not be available until around early November 2026, after which access will be limited to the most recent two years. A full two years of historical orders can be accessed in the Live environment.",
             "required": true,
             "schema": {
               "type": "string",
-              "example": "2006-01-13"
+              "example": "2026-01-13"
             }
           }
         ],
@@ -1582,19 +1602,19 @@
         "x-codeSamples": [
           {
             "lang": "Shell",
-            "source": "curl --request GET \\\n  --url 'https://api.tradestation.com/v3/brokerage/accounts/61999124,68910124/historicalorders/123456789,286179863?since=2006-01-13' \\\n  --header 'Authorization: Bearer TOKEN'"
+            "source": "curl --request GET \\\n  --url 'https://api.tradestation.com/v3/brokerage/accounts/61999124,68910124/historicalorders/123456789,286179863?since=2026-01-13' \\\n  --header 'Authorization: Bearer TOKEN'"
           },
           {
             "lang": "Node",
-            "source": "const request = require('request');\n\nconst options = {\n  method: 'GET',\n  url: 'https://api.tradestation.com/v3/brokerage/accounts/61999124,68910124/historicalorders/123456789,286179863',\n  qs: {since: '2006-01-13'},\n  headers: {Authorization: 'Bearer TOKEN'}\n};\n\nrequest(options, function (error, response, body) {\n  if (error) throw new Error(error);\n\n  console.log(body);\n});\n"
+            "source": "const request = require('request');\n\nconst options = {\n  method: 'GET',\n  url: 'https://api.tradestation.com/v3/brokerage/accounts/61999124,68910124/historicalorders/123456789,286179863',\n  qs: {since: '2026-01-13'},\n  headers: {Authorization: 'Bearer TOKEN'}\n};\n\nrequest(options, function (error, response, body) {\n  if (error) throw new Error(error);\n\n  console.log(body);\n});\n"
           },
           {
             "lang": "Python",
-            "source": "import requests\n\nurl = \"https://api.tradestation.com/v3/brokerage/accounts/61999124,68910124/historicalorders/123456789,286179863\"\n\nquerystring = {\"since\":\"2006-01-13\"}\n\nheaders = {\"Authorization\": \"Bearer TOKEN\"}\n\nresponse = requests.request(\"GET\", url, headers=headers, params=querystring)\n\nprint(response.text)"
+            "source": "import requests\n\nurl = \"https://api.tradestation.com/v3/brokerage/accounts/61999124,68910124/historicalorders/123456789,286179863\"\n\nquerystring = {\"since\":\"2026-01-13\"}\n\nheaders = {\"Authorization\": \"Bearer TOKEN\"}\n\nresponse = requests.request(\"GET\", url, headers=headers, params=querystring)\n\nprint(response.text)"
           },
           {
             "lang": "C#",
-            "source": "var client = new HttpClient();\nvar request = new HttpRequestMessage\n{\n    Method = HttpMethod.Get,\n    RequestUri = new Uri(\"https://api.tradestation.com/v3/brokerage/accounts/61999124,68910124/historicalorders/123456789,286179863?since=2006-01-13\"),\n    Headers =\n    {\n        { \"Authorization\", \"Bearer TOKEN\" },\n    },\n};\nusing (var response = await client.SendAsync(request))\n{\n    response.EnsureSuccessStatusCode();\n    var body = await response.Content.ReadAsStringAsync();\n    Console.WriteLine(body);\n}"
+            "source": "var client = new HttpClient();\nvar request = new HttpRequestMessage\n{\n    Method = HttpMethod.Get,\n    RequestUri = new Uri(\"https://api.tradestation.com/v3/brokerage/accounts/61999124,68910124/historicalorders/123456789,286179863?since=2026-01-13\"),\n    Headers =\n    {\n        { \"Authorization\", \"Bearer TOKEN\" },\n    },\n};\nusing (var response = await client.SendAsync(request))\n{\n    response.EnsureSuccessStatusCode();\n    var body = await response.Content.ReadAsStringAsync();\n    Console.WriteLine(body);\n}"
           }
         ]
       }
@@ -1616,6 +1636,26 @@
             "schema": {
               "type": "string",
               "example": "61999124,68910124"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Filter orders by status. Multiple statuses can be specified, comma separated. Valid values are Open, Filled, Cancelled (or Canceled), Rejected.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "example": "Open,Filled,Rejected"
+            }
+          },
+          {
+            "name": "symbol",
+            "in": "query",
+            "description": "Filter orders by symbol. Multiple symbols can be specified, comma separated. For example `\"MSFT,AAPL,GOOG,AAPL 251031C270\"`.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "example": "MSFT,GOOG"
             }
           },
           {
@@ -2501,6 +2541,24 @@
                     "Legs": [
                       {
                         "Symbol": "MSFT 261218P450",
+                        "Quantity": "1",
+                        "TradeAction": "BuyToOpen"
+                      }
+                    ]
+                  }
+                },
+                "Single Option Order (Plus Duration)": {
+                  "value": {
+                    "AccountID": "123456782",
+                    "OrderType": "Limit",
+                    "LimitPrice": "2.50",
+                    "TimeInForce": {
+                      "Duration": "GCP"
+                    },
+                    "Route": "Intelligent",
+                    "Legs": [
+                      {
+                        "Symbol": "SPY 261218C600",
                         "Quantity": "1",
                         "TradeAction": "BuyToOpen"
                       }
@@ -3867,6 +3925,24 @@
                     ]
                   }
                 },
+                "Single Option Order (Plus Duration)": {
+                  "value": {
+                    "AccountID": "123456782",
+                    "OrderType": "Limit",
+                    "LimitPrice": "2.50",
+                    "TimeInForce": {
+                      "Duration": "GCP"
+                    },
+                    "Route": "Intelligent",
+                    "Legs": [
+                      {
+                        "Symbol": "SPY 261218C600",
+                        "Quantity": "1",
+                        "TradeAction": "BuyToOpen"
+                      }
+                    ]
+                  }
+                },
                 "Covered/Married Stock": {
                   "value": {
                     "AccountID": "123456782",
@@ -4787,7 +4863,7 @@
           {
             "name": "sessiontemplate",
             "in": "query",
-            "description": "Applies to Intraday bars only (not used for Daily, Weekly and Monthly bars).  United States (US) \nstock market session templates, that extend bars returned to include those outside of the regular \ntrading session. Ignored for non-US equity symbols. Valid values are: `USEQPre`, `USEQPost`, \n`USEQPreAndPost`, `USEQ24Hour`,`Default`.",
+            "description": "Applies to Intraday bars only (not used for Daily, Weekly and Monthly bars). United States (US)  stock market session templates, that extend bars returned to include those outside of the regular  trading session. Only applies to U.S. equities and U.S. option symbols. Ignored for any other symbol type.  Valid values are: `USEQPre`, `USEQPost`, `USEQPreAndPost`, `USEQ24Hour`, `USOptPre`, `USOptPost`,  `USOptPreAndPost`, `Default`. Example: `symbol=AAPL 261218C150&unit=Minute&interval=1&sessiontemplate=USOptPreAndPost`.",
             "schema": {
               "type": "string"
             }
@@ -5099,7 +5175,7 @@
           {
             "name": "sessiontemplate",
             "in": "query",
-            "description": "Applies to Intraday bars only (not used for Daily, Weekly and Monthly bars).  United States (US) \nstock market session templates, that extend bars returned to include those outside of the regular \ntrading session. Ignored for non-US equity symbols. Valid values are: `USEQPre`, `USEQPost`, \n`USEQPreAndPost`, `USEQ24Hour`,`Default`.",
+            "description": "Applies to Intraday bars only (not used for Daily, Weekly and Monthly bars). United States (US)  stock market session templates, that extend bars returned to include those outside of the regular  trading session. Only applies to U.S. equities and U.S. option symbols. Ignored for any other symbol type.  Valid values are: `USEQPre`, `USEQPost`, `USEQPreAndPost`, `USEQ24Hour`, `USOptPre`, `USOptPost`,  `USOptPreAndPost`, `Default`. Example: `symbol=AAPL 261218C150&unit=Minute&interval=1&sessiontemplate=USOptPreAndPost`.",
             "schema": {
               "type": "string"
             }
@@ -10404,7 +10480,7 @@
         }
       },
       "TimeStamp": {
-        "type": "object",
+        "type": "string",
         "description": "Timestamp represented as an RFC3339 formatted date, a profile of the ISO 8601 date standard. \nE.g. `2023-01-01T23:30:30Z`."
       },
       "SymbolDetailsErrorResponse": {
@@ -10586,7 +10662,7 @@
         }
       },
       "TimeUtc": {
-        "type": "object",
+        "type": "string",
         "description": "Timestamp represented as an RFC3339 formatted date, a profile of the ISO 8601 date standard.\nFor time activated orders, the date portion is required but not relevant. E.g. `2023-01-01T23:30:30Z`."
       },
       "BalanceDetail": {
@@ -10850,7 +10926,7 @@
             "description": "The price at which order execution occurred."
           },
           "ExpirationDate": {
-            "type": "object",
+            "type": "string",
             "description": "The expiration date of the future or option symbol."
           },
           "OpenOrClose": {
@@ -10885,7 +10961,7 @@
         "description": "OrderLeg is an object returned from WebAPI."
       },
       "ExpirationDate": {
-        "type": "object",
+        "type": "string",
         "description": "Timestamp represented as an RFC3339 formatted date, a profile of the ISO 8601 date standard. \nE.g. `2023-01-01T23:30:30Z`."
       },
       "CallPut": {
@@ -10921,10 +10997,10 @@
       },
       "Duration": {
         "type": "string",
-        "description": "The length of time for which an order will remain valid in the market. Available values are: DAY, DYP, GTC, GCP, GTD, GDP, OPG, CLO, IOC, FOK, 1, 3, and 5. Different asset classes and routes may have restrictions on the durations they accept.\n* DAY - Day, valid until the end of the regular trading session.\n* DYP - Day Plus; valid until the end of the extended trading session.\n* GTC - Good till canceled. Maximum lifespan is 90 calendar days.\n* GCP - Good till canceled plus. Maximum lifespan is 90 calendar days.\n* GTD - Good through date. Maximum lifespan is 90 calendar days.\n* GDP - Good through date plus. Maximum lifespan is 90 calendar days.\n* OPG - At the opening; only valid for listed stocks at the opening session Price.\n* CLO - On Close; orders that target the closing session of an exchange.\n* IOC - Immediate or Cancel; filled immediately or canceled, partial fills are accepted.\n* FOK - Fill or Kill; orders are filled entirely or canceled, partial fills are not accepted.\n* 1 - 1 minute; expires after the 1 minute. Only valid for equity orders.\n* 3 - 3 minutes; expires after the 3 minutes. Only valid for equity orders.\n* 5 - 5 minutes; expires after the 5 minutes. Only valid for equity orders.\n"
+        "description": "The length of time for which an order will remain valid in the market. Available values are: DAY, DYP, GTC, GCP, GTD, GDP, OPG, CLO, IOC, FOK, 1, 3, and 5. Different asset classes and routes may have restrictions on the durations they accept.\n* DAY - Day, valid until the end of the regular trading session.\n* DYP - Day Plus; valid until the end of the extended trading session.\n* GTC - Good till canceled. Maximum lifespan is 90 calendar days.\n* GCP - Good till canceled plus. Maximum lifespan is 90 calendar days.\n* GTD - Good through date. Maximum lifespan is 90 calendar days.\n* GDP - Good through date plus. Maximum lifespan is 90 calendar days.\n* OPG - At the opening; only valid for listed stocks at the opening session Price.\n* CLO - On Close; orders that target the closing session of an exchange.\n* IOC - Immediate or Cancel; filled immediately or canceled, partial fills are accepted.\n* FOK - Fill or Kill; orders are filled entirely or canceled, partial fills are not accepted.\n* 1 - 1 minute; expires after the 1 minute. Only valid for equity orders.\n* 3 - 3 minutes; expires after the 3 minutes. Only valid for equity orders.\n* 5 - 5 minutes; expires after the 5 minutes. Only valid for equity orders.\n\nOptions on certain highly liquid underlying symbols can trade beyond regular trading hours, during Global Trading Hours (GTH) and post-market curb trading. To trade during these sessions, use a Plus duration (`DYP`, `GCP` or `GDP`).\n\nOptions orders with a Plus duration do not support the Stop Limit, Stop Market and Trailing Stop order types, and are rejected when submitted.\n\nOrder and order stream endpoints return Plus durations as `Day+`, `GTC+` and `GTD+`.\n"
       },
       "ExpirationResponse": {
-        "type": "object",
+        "type": "string",
         "description": "Timestamp represented as an RFC3339 formatted date, a profile of the ISO 8601 date standard.\nOnly applicable to GTD and GDP orders. The full timestamp is returned, but only the date portion is relevant. E.g. `2023-01-01T23:30:30Z`. "
       },
       "TrailingStop": {
@@ -10983,7 +11059,7 @@
         ]
       },
       "Expiration": {
-        "type": "object",
+        "type": "string",
         "description": "Timestamp represented as an RFC3339 formatted date, a profile of the ISO 8601 date standard.\nOnly applicable to GTD and GDP orders. The full timestamp is required, but only the date portion is relevant. E.g. `2023-01-01T23:30:30Z`."
       },
       "OrderBase": {
@@ -11023,7 +11099,7 @@
           },
           "Duration": {
             "type": "string",
-            "description": "The amount of time for which an order is valid."
+            "description": "The amount of time for which an order is valid. Orders placed with a Plus duration (`DYP`, `GCP` or `GDP`) are returned as `Day+`, `GTC+` or `GTD+`."
           },
           "FilledPrice": {
             "type": "string",
@@ -12362,7 +12438,7 @@
           },
           "Duration": {
             "type": "string",
-            "description": "The amount of time for which an order is valid."
+            "description": "The amount of time for which an order is valid. Orders placed with a Plus duration (`DYP`, `GCP` or `GDP`) are returned as `Day+`, `GTC+` or `GTD+`."
           },
           "FilledPrice": {
             "type": "string",
@@ -12487,7 +12563,7 @@
             "description": "The price at which order execution occurred."
           },
           "ExpirationDate": {
-            "type": "object",
+            "type": "string",
             "description": "The expiration date of the future or option symbol."
           },
           "OpenOrClose": {
@@ -12586,7 +12662,7 @@
       },
       "TimeUtc1": {
         "title": "TimeUtc",
-        "type": "object",
+        "type": "string",
         "description": "Timestamp represented as an RFC3339 formatted date, a profile of the ISO 8601 date standard.\nFor time activated orders, the date portion is required but not relevant. E.g. `0001-01-01T23:30:30Z`."
       },
       "TrailingStop1": {
