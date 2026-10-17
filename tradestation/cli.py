@@ -5,6 +5,7 @@ Command-line interface for TradeStation data downloader.
 import argparse
 import calendar
 import logging
+import math
 import re
 import sys
 from datetime import UTC, date, datetime, timedelta
@@ -252,6 +253,8 @@ Examples:
   %(prog)s --full -o my_orders.csv          Discard cache, re-download, custom output
   %(prog)s -a 12345678 -s 2025-01-01 -e latest
   %(prog)s --include-open                   Also include still-open orders
+
+Convert output to TradingDiary Pro format: orders-to-tdpro FILE
 """,
     )
 
@@ -297,6 +300,72 @@ Examples:
         default=None,
         metavar="ID",
         help="TradeStation account ID (required when the login has multiple accounts)",
+    )
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Enable verbose (debug) logging",
+    )
+
+    return parser
+
+
+def _multiplier_type(value: str) -> tuple[str, str]:
+    """Argparse type for -m/--multiplier ROOT=VALUE; returns a (root, value) pair."""
+    root, sep, num = value.partition("=")
+    root = root.strip().upper()  # TradeStation roots are uppercase
+    if not sep or not root:
+        raise argparse.ArgumentTypeError(
+            f"multiplier must be in ROOT=VALUE form, got {value!r}"
+        )
+    try:
+        amount = float(num)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"multiplier value must be a number, got {value!r}"
+        ) from exc
+    if not math.isfinite(amount) or amount <= 0:
+        raise argparse.ArgumentTypeError(
+            f"multiplier value must be a finite positive number, got {value!r}"
+        )
+    return root, num.strip()
+
+
+def create_tdpro_parser() -> argparse.ArgumentParser:
+    """Create argument parser for the orders-to-tdpro converter."""
+    parser = argparse.ArgumentParser(
+        prog="orders-to-tdpro",
+        description="Convert a tradestation-downloader orders CSV to "
+                    "TradingDiary Pro import format (futures)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s orders/12345678_2025-01-01_2025-12-31.csv
+                                  Convert to <stem>_tdpro.csv next to the input
+  %(prog)s orders.csv -o out.csv  Custom output path
+  %(prog)s orders.csv -m ES=50 -m MGC=10
+                                  Add/override contract multipliers
+""",
+    )
+
+    parser.add_argument(
+        "file",
+        metavar="FILE",
+        help="Orders CSV produced by 'tradestation-download orders'",
+    )
+    parser.add_argument(
+        "-o", "--out",
+        default=None,
+        metavar="FILE",
+        help="Output CSV path (default: <input_stem>_tdpro.csv next to input)",
+    )
+    parser.add_argument(
+        "-m", "--multiplier",
+        action="append",
+        type=_multiplier_type,
+        default=[],
+        metavar="ROOT=VALUE",
+        help="Add or override a contract point value; repeatable",
     )
     parser.add_argument(
         "-v", "--verbose",
@@ -519,6 +588,48 @@ def main_orders() -> int:
         logging.getLogger().setLevel(logging.DEBUG)
 
     return run_orders_mode(parser, args)
+
+
+def run_tdpro_mode(args: argparse.Namespace) -> int:
+    """Run the orders-to-tdpro converter."""
+    from .tdpro import TdproError, convert_orders_csv
+
+    input_path = Path(args.file)
+    if args.out:
+        output_path = Path(args.out)
+    else:
+        output_path = input_path.with_name(input_path.stem + "_tdpro.csv")
+
+    # args.multiplier is a list of (root, value) pairs from _multiplier_type
+    multipliers = dict(args.multiplier)
+
+    try:
+        n_trades, n_orders = convert_orders_csv(input_path, output_path, multipliers)
+    except TdproError as e:
+        logger.error(str(e))
+        return 1
+    except KeyboardInterrupt:
+        logger.info("\nConversion interrupted by user")
+        return 130
+    except Exception as e:
+        logger.error("Unexpected error: %s", e)
+        if args.verbose:
+            raise
+        return 1
+
+    print(f"Wrote {output_path} ({n_trades:,} trades from {n_orders:,} orders)")
+    return 0
+
+
+def main_tdpro() -> None:
+    """Entry point for the orders-to-tdpro converter CLI."""
+    parser = create_tdpro_parser()
+    args = parser.parse_args()
+
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+
+    sys.exit(run_tdpro_mode(args))
 
 
 def main_auth() -> None:

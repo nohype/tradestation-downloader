@@ -23,6 +23,7 @@ tradestation/
 ├── storage.py        # StorageBackend ABC + SingleFile/Daily/Monthly implementations
 ├── downloader.py     # TradeStationDownloader - core download logic
 ├── orders.py         # Orders mode: fetch, incremental parquet cache, CSV export
+├── tdpro.py          # orders-to-tdpro: orders CSV → TradingDiary Pro import format
 ├── config.py         # Configuration loading from YAML
 └── cli.py            # Command-line interface
 
@@ -60,6 +61,9 @@ tradestation-download --category index        # Download category
 tradestation-download orders [-s START] [-e END] [-a ACCOUNT] [-o OUT] [--full] [--include-open]
 tradestation-download orders -s 2024-01-01 -e 2025-01-31
 tradestation-download orders -a 12345678 -s 2025-01-01 -e latest
+
+# Convert orders CSV to TradingDiary Pro import format (futures)
+orders-to-tdpro orders/<file>.csv
 ```
 
 ## Architecture

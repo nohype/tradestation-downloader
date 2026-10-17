@@ -51,6 +51,7 @@ dev = [
 [project.scripts]
 tradestation-download = "tradestation.cli:main_download"
 tradestation-auth = "tradestation.cli:main_auth"
+orders-to-tdpro = "tradestation.cli:main_tdpro"
 
 [project.urls]
 Homepage = "https://github.com/elihayc/tradestation-downloader"

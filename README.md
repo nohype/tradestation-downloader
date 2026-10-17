@@ -254,6 +254,24 @@ orders/
 
 The CSV is generated from the cache for the requested `--start`/`--end` span and always replaced. Note the API only provides roughly the last 730 days of order history.
 
+### Converting orders to TradingDiary Pro
+
+`orders-to-tdpro` converts an orders CSV into the 17-column format TradingDiary Pro's Excel Importer expects — futures only. Each executed leg becomes one trade row: buys are positive quantities, sells are negative. Contract multipliers come from a small built-in table (CME-verified: MES=5, MNG=1000, 1OZ=1) and can be added or overridden with `-m ROOT=VALUE`; an unknown underlying root fails with an error naming the missing roots. `Conversion rate` is left empty so TD Pro applies its own FX rate. Order datetimes are written as naive UTC (as stored in the orders CSV) — TD Pro will show them as-is, so users in other timezones should be aware.
+
+```bash
+uv run orders-to-tdpro orders/<account_id>_<start>_<end>.csv
+uv run orders-to-tdpro orders/orders.csv -o tdpro_import.csv
+uv run orders-to-tdpro orders/orders.csv -m ES=50 -m MGC=10
+```
+
+| Flag | Long | Default | Description |
+|------|------|---------|-------------|
+| `-o` | `--out` | `<input_stem>_tdpro.csv` next to input | Output CSV path |
+| `-m` | `--multiplier` | built-in table only | Add/override a contract point value as `ROOT=VALUE`; repeatable |
+| `-v` | `--verbose` | off | Enable verbose (debug) logging |
+
+`-m` values are not persisted — repeat the flag on each run that needs them.
+
 ## Loading Data
 
 ```python

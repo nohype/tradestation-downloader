@@ -1,0 +1,251 @@
+You can add trades in bulk using excel files (csv, xlsx). There is a Transactions.xls template file under the Program Files\Sword Tech\TradingDiary Pro\GeneralExcelImportSamples directory.
+
+Click on the Transactions tab and fill in the template with your trades and then save as a new file in the Documents folder. Please note you cannot save the file in its original location because those files are read-only.
+
+Set 'Excel Importer' as import module. For detailed information read the Import Introduction chapter.
+
+ 
+
+Click on the 'Import/Import - Excel' menu. A file dialog appears. Select the previously saved xlsx file and click on Open.
+
+ 
+
+You are done. Now you can see the import manager which shows the number of imported elements.
+
+ 
+
+ 
+
+Description of the columns:
+
+ 
+
+1.TransactionID                unique identifier for each transaction. TradingDiary Pro use this value to identify duplicated transactions. If you leave it empty TradingDiary Pro generate a value from the based on the row values.
+
+2.DateTime                Date and time of the transaction
+
+3.Ticker                        Ticker of the instrument
+
+4.Description                Description
+
+5.Quantity                Quantity
+
+6.Price                        The price that an investor pays for a security
+
+7.Commission                Commission paid to the brokerage
+
+8.Asset Category                Asset category, possible values are: Stock, Futures, Option, Futures Option, Forex, Bond, Warrant, CFD
+
+9.Multiplier                Multiplier of the instrument,
+
+10.Currency                Three digit universal currency code. For example: USD, EUR, AUD, CAD, JPY, HUF
+
+11.Conversion rate        Conversion rate to base currency, used only if the base currency differs from the currency of the transaction
+
+12.Expiration Date                Expiration date of the instrument, available for Futures, Option, Futures Option and Warrant asset categories
+
+13.Call or Put                Call or Put, available for Option, Futures Option and Warrant asset categories
+
+14.Strike                        Strike of the option or warrant
+
+15.Note                        Note
+
+16.Exchange                Name of the exchange
+
+17.Tag(s)                        Tags separated by a semicolon character. If the string does not contain semicolon the whole string will be added as a single tag.
+
+ 
+
+ 
+
+Stock:
+
+1.TransactionID                optional, if it is used please provide a unique identifier for each transaction
+
+2.DateTime                obligatory
+
+3.Ticker                        obligatory
+
+4.Description                optional, if the columns is empty ticker is used
+
+5.Quantity                obligatory
+
+6.Price                        obligatory
+
+7.Commission                optional
+
+8.Asset Category                Stock
+
+9.Multiplier                1
+
+10.Currency                optional, if empty base currency is used
+
+11.Conversion rate        optional, use it of the currency differs from the base currency
+
+12.Expiration Date                unused
+
+13.Call or Put                unused
+
+14.Strike                        unused
+
+15.Note                        optional
+
+16.Exchange                optional
+
+17.Tags                        optional
+
+ 
+
+ 
+
+Futures:
+
+1.TransactionID                optional, if it is used please provide a unique identifier for each transaction
+
+2.DateTime                obligatory
+
+3.Ticker                        obligatory
+
+4.Description                optional, if the columns is empty ticker is used
+
+5.Quantity                obligatory
+
+6.Price                        obligatory
+
+7.Commission                optional
+
+8.Asset Category                Futures
+
+9.Multiplier                obligatory
+
+10.Currency                optional, if empty base currency is used
+
+11.Conversion rate        optional, use it of the currency differs from the base currency
+
+12.Expiration Date                optional
+
+13.Call or Put                unused
+
+14.Strike                        unused
+
+15.Note                        optional
+
+16.Exchange                optional
+
+17.Tags                        optional
+
+ 
+
+Options:
+
+1.TransactionID                optional, if it is used please provide a unique identifier for each transaction
+
+2.DateTime                obligatory
+
+3.Ticker                        obligatory
+
+4.Description                optional, if the columns is empty ticker is used
+
+5.Quantity                obligatory
+
+6.Price                        obligatory
+
+7.Commission                optional
+
+8.Asset Category                Option
+
+9.Multiplier                obligatory
+
+10.Currency                optional, if empty base currency is used
+
+11.Conversion rate        optional, use it of the currency differs from the base currency
+
+12.Expiration Date                optional
+
+13.Call or Put                obligatory
+
+14.Strike                        obligatory
+
+15.Note                        optional
+
+16.Exchange                optional
+
+17.Tags                        optional
+
+ 
+
+Future Options:
+
+1.TransactionID                optional, if it is used please provide a unique identifier for each transaction
+
+2.DateTime                obligatory
+
+3.Ticker                        obligatory
+
+4.Description                optional, if the columns is empty ticker is used
+
+5.Quantity                obligatory
+
+6.Price                        obligatory
+
+7.Commission                optional
+
+8.Asset Category                Future Option
+
+9.Multiplier                obligatory
+
+10.Currency                optional, if empty base currency is used
+
+11.Conversion rate        optional, use it of the currency differs from the base currency
+
+12.Expiration Date                optional
+
+13.Call or Put                obligatory
+
+14.Strike                        obligatory
+
+15.Note                        optional
+
+16.Exchange                optional
+
+17.Tags                        optional
+
+ 
+
+Forex:
+
+1.TransactionID                optional, if it is used please provide a unique identifier for each transaction
+
+2.DateTime                obligatory
+
+3.Ticker                        obligatory
+
+4.Description                optional, if the columns is empty ticker is used
+
+5.Quantity                obligatory
+
+6.Price                        obligatory
+
+7.Commission                optional
+
+8.Asset Category                Forex
+
+9.Multiplier                1
+
+10.Currency                obligatory
+
+11.Conversion rate        obligatory
+
+12.Expiration Date                unused
+
+13.Call or Put                unused
+
+14.Strike                        unused
+
+15.Note                        optional
+
+16.Exchange                optional
+
+17.Tags                        optional
+
+ 
