@@ -24,6 +24,7 @@ tradestation/
 ├── downloader.py     # TradeStationDownloader - core download logic
 ├── orders.py         # Orders mode: fetch, incremental parquet cache, CSV export
 ├── tdpro.py          # orders-to-tdpro: orders CSV → TradingDiary Pro import format
+├── fx.py             # ECB daily reference rates + JSON cache for tdpro --fx
 ├── config.py         # Configuration loading from YAML
 └── cli.py            # Command-line interface
 
@@ -64,6 +65,7 @@ tradestation-download orders -a 12345678 -s 2025-01-01 -e latest
 
 # Convert orders CSV to TradingDiary Pro import format (futures)
 orders-to-tdpro orders/<file>.csv
+orders-to-tdpro orders/<file>.csv --fx EUR   # Fill Conversion rate with ECB daily rates
 ```
 
 ## Architecture

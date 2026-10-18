@@ -256,19 +256,26 @@ The CSV is generated from the cache for the requested `--start`/`--end` span and
 
 ### Converting orders to TradingDiary Pro
 
-`orders-to-tdpro` converts an orders CSV into the 17-column format TradingDiary Pro's Excel Importer expects — futures only. Each executed leg becomes one trade row: buys are positive quantities, sells are negative. Contract multipliers come from a small built-in table (CME-verified: MES=5, MNG=1000, 1OZ=1) and can be added or overridden with `-m ROOT=VALUE`; an unknown underlying root fails with an error naming the missing roots. `Conversion rate` is left empty so TD Pro applies its own FX rate. Order datetimes are written as naive UTC (as stored in the orders CSV) — TD Pro will show them as-is, so users in other timezones should be aware.
+`orders-to-tdpro` converts an orders CSV into the 17-column format TradingDiary Pro's Excel Importer expects — futures only. Each executed leg becomes one trade row: buys are positive quantities, sells are negative. Contract multipliers come from a small built-in table (CME-verified: MES=5, MNG=1000, 1OZ=1) and can be added or overridden with `-m ROOT=VALUE`; an unknown underlying root fails with an error naming the missing roots. `Conversion rate` is left empty so TD Pro applies its own FX rate, unless `--fx BASE` is given (see below). Order datetimes are written as naive UTC (as stored in the orders CSV) — TD Pro will show them as-is, so users in other timezones should be aware.
 
 ```bash
 uv run orders-to-tdpro orders/<account_id>_<start>_<end>.csv
 uv run orders-to-tdpro orders/orders.csv -o tdpro_import.csv
 uv run orders-to-tdpro orders/orders.csv -m ES=50 -m MGC=10
+uv run orders-to-tdpro orders/orders.csv --fx EUR
 ```
 
 | Flag | Long | Default | Description |
 |------|------|---------|-------------|
 | `-o` | `--out` | `<input_stem>_tdpro.csv` next to input | Output CSV path |
 | `-m` | `--multiplier` | built-in table only | Add/override a contract point value as `ROOT=VALUE`; repeatable |
+| | `--fx` | off (column empty) | Fill Conversion rate with ECB daily reference rates to `BASE` (e.g. `EUR`) |
+| | `--fx-date` | `berlin` | Calendar date for the ECB rate lookup: `berlin` = German-local fill date (tax-relevant), `utc` = recorded date. Requires `--fx` |
 | `-v` | `--verbose` | off | Enable verbose (debug) logging |
+
+`--fx EUR` writes the official **ECB Euro-Referenzkurs** per leg date into `Conversion rate` — the per-leg conversion mandated for German tax reporting (R 34c Abs. 1 EStR / § 20 Abs. 4 Satz 1 EStG). The ECB publishes around **16:00 CET** on TARGET working days. The cache records each fetch's coverage only through the newest publication the ECB actually returned — a run before (or during a delayed) publication never claims the unpublished day, so re-running after the publication lands refetches once and picks up the same-day rate. A fill needing a rate that isn't published yet gets the last published rate plus a warning to re-run later. Rate dates are the fill's German-local (Europe/Berlin) calendar date by default — e.g. fills late Sunday evening UTC count as Monday fills during CEST but remain Sunday-dated during CET; `--fx-date utc` uses the recorded UTC date instead. Weekend/holiday dates resolve to the last previously published rate.
+
+Rates cache to `orders/fx_cache/<CCY>.json` — human-inspectable files recording both the published rates and the fetched date windows that prove coverage. A currency is only re-fetched when its cached windows cannot cover the needed dates; deleting a currency's file forces a clean re-fetch.
 
 `-m` values are not persisted — repeat the flag on each run that needs them.
 

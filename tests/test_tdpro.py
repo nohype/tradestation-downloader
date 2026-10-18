@@ -4,13 +4,15 @@ import csv
 import json
 import logging
 import sys
-from decimal import Decimal
+from datetime import date, datetime
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pandas as pd
 import pytest
 
+from tradestation import fx, tdpro
 from tradestation.cli import create_tdpro_parser, main_tdpro, run_tdpro_mode
 from tradestation.tdpro import (
     TDPRO_COLUMNS,
@@ -724,3 +726,1324 @@ class TestDecimalFormatting:
         out = _convert(tmp_path, rows, multipliers={"ES": Decimal("2.5")})
         _, data = _read_output(out)
         assert dict(zip(TDPRO_COLUMNS, data[0], strict=True))["Multiplier"] == "2.5"
+
+
+def _ecb_csv(rates: dict[date, str]) -> str:
+    """Build an ECB csvdata payload (TIME_PERIOD/OBS_VALUE) from a rate map."""
+    lines = ["TIME_PERIOD,OBS_VALUE"]
+    lines += [f"{day.isoformat()},{value}" for day, value in rates.items()]
+    return "\n".join(lines) + "\n"
+
+
+def _fx_response(text: str = "", status_code: int = 200,
+                 headers: dict | None = None) -> Mock:
+    """Build a fake requests.Response for the ECB endpoint."""
+    resp = Mock()
+    resp.status_code = status_code
+    resp.headers = headers or {}
+    resp.text = text
+    return resp
+
+
+@pytest.fixture
+def fx_cache_dir(tmp_path, monkeypatch) -> Path:
+    """Point fx.FX_CACHE_DIR at a tmp dir so tests never touch the real cache."""
+    cache_dir = tmp_path / "fxcache"
+    monkeypatch.setattr(fx, "FX_CACHE_DIR", cache_dir)
+    return cache_dir
+
+
+def _seed_fx_cache(cache_dir: Path, currency: str,
+                   rates: dict[date, str],
+                   windows: list[tuple[date, date]] | None = None) -> Path:
+    """Write a <CCY>.json cache file in the patched FX cache dir.
+
+    ``windows=None`` writes a legacy file (rates only, no "windows"
+    key); pass a list of ``(start, end)`` pairs for the v3 windowed
+    format. No ``"version"`` key is written — seeded files exercise the
+    legacy (missing-version) load path.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = cache_dir / f"{currency}.json"
+    payload: dict = {"rates": {day.isoformat(): v for day, v in rates.items()}}
+    if windows is not None:
+        payload["windows"] = [
+            [start.isoformat(), end.isoformat()] for start, end in windows
+        ]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def _berlin(year: int, month: int, day: int, hour: int = 18,
+            minute: int = 0) -> datetime:
+    """A tz-aware Europe/Berlin datetime for freezing tdpro's clock —
+    tdpro derives its ``today`` (fetch end + warning gate) from
+    ``datetime.now(ZoneInfo('Europe/Berlin'))``, which ``_freeze_now``
+    patches."""
+    return datetime(year, month, day, hour, minute, tzinfo=fx.BERLIN)
+
+
+def _freeze_now(monkeypatch, moment: datetime) -> None:
+    """Patch tradestation.tdpro.datetime so now() returns ``moment``.
+
+    ``moment`` should be tz-aware (Europe/Berlin); a subclass keeps
+    ``datetime.fromisoformat`` etc. working for the rest of tdpro.
+    """
+    class _FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return moment.astimezone(tz) if tz else moment.replace(tzinfo=None)
+
+    monkeypatch.setattr(tdpro, "datetime", _FrozenDateTime)
+
+
+def _expected_rate_cell(ecb_rate: str) -> str:
+    """The exact Conversion rate cell for 1/ecb_rate quantized to 8dp."""
+    rate = (Decimal(1) / Decimal(ecb_rate)).quantize(
+        Decimal("0.00000001"), rounding=ROUND_HALF_UP
+    )
+    return format(rate, "f")
+
+
+class TestFetchEcbDaily:
+    """Unit tests for fx.fetch_ecb_daily (ECB CSV fetch + parse + retry)."""
+
+    def test_parses_ecb_csv_to_date_decimal_map(self):
+        """TIME_PERIOD/OBS_VALUE rows parse to {date: Decimal}."""
+        csv_text = _ecb_csv({
+            date(2026, 7, 9): "1.1418",
+            date(2026, 7, 10): "1.1419",
+        })
+        with patch(
+            "tradestation.fx.requests.get",
+            return_value=_fx_response(csv_text),
+        ):
+            rates = fx.fetch_ecb_daily(
+                "USD", date(2026, 7, 9), date(2026, 7, 10)
+            )
+        assert rates == {
+            date(2026, 7, 9): Decimal("1.1418"),
+            date(2026, 7, 10): Decimal("1.1419"),
+        }
+
+    def test_404_names_currency_as_not_ecb_quoted(self):
+        """A 404 means the currency is not an ECB-quoted series: the error
+        names the currency and says so, without retrying."""
+        with (
+            patch(
+                "tradestation.fx.requests.get",
+                return_value=_fx_response("oops", status_code=404),
+            ) as mock_get,
+            pytest.raises(
+                fx.FxError,
+                match="currency XXX is not an ECB-quoted daily "
+                      "reference currency",
+            ),
+        ):
+            fx.fetch_ecb_daily("XXX", date(2026, 7, 1), date(2026, 7, 2))
+        assert mock_get.call_count == 1
+
+    def test_non_200_non_404_raises_generic_fx_error(self):
+        """Other non-retryable statuses keep the generic message."""
+        with (
+            patch(
+                "tradestation.fx.requests.get",
+                return_value=_fx_response("oops", status_code=403),
+            ) as mock_get,
+            pytest.raises(fx.FxError, match="403"),
+        ):
+            fx.fetch_ecb_daily("USD", date(2026, 7, 1), date(2026, 7, 2))
+        assert mock_get.call_count == 1
+
+    def test_429_honors_retry_after_header(self):
+        """A 429 sleeps Retry-After seconds, then retries successfully."""
+        responses = [
+            _fx_response(status_code=429, headers={"Retry-After": "7"}),
+            _fx_response(_ecb_csv({date(2026, 7, 10): "1.1419"})),
+        ]
+        with (
+            patch("tradestation.fx.requests.get", side_effect=responses),
+            patch("tradestation.fx.time.sleep") as mock_sleep,
+        ):
+            rates = fx.fetch_ecb_daily(
+                "USD", date(2026, 7, 10), date(2026, 7, 10)
+            )
+        assert rates == {date(2026, 7, 10): Decimal("1.1419")}
+        mock_sleep.assert_called_once_with(7)
+
+    def test_malformed_csv_raises_fx_error(self):
+        """A 200 with unparseable CSV content raises FxError."""
+        bad = "TIME_PERIOD,OBS_VALUE\nnot-a-date,1.2\n"
+        with (
+            patch(
+                "tradestation.fx.requests.get",
+                return_value=_fx_response(bad),
+            ),
+            pytest.raises(fx.FxError, match="Could not parse ECB CSV"),
+        ):
+            fx.fetch_ecb_daily("USD", date(2026, 7, 1), date(2026, 7, 2))
+
+
+class TestRateOn:
+    """Unit tests for fx.rate_on (last-published-rate fallback)."""
+
+    def test_exact_date_hit(self):
+        """A date present in the series returns that day's rate."""
+        rates = {
+            date(2026, 7, 9): Decimal("1.10"),
+            date(2026, 7, 10): Decimal("1.20"),
+        }
+        assert fx.rate_on(rates, date(2026, 7, 10)) == Decimal("1.20")
+
+    def test_weekend_falls_back_to_friday(self):
+        """A Sunday lookup returns the previous Friday's published rate."""
+        rates = {
+            date(2026, 7, 9): Decimal("1.10"),   # Thursday
+            date(2026, 7, 10): Decimal("1.20"),  # Friday
+        }
+        sunday = date(2026, 7, 12)
+        assert sunday.weekday() == 6
+        assert fx.rate_on(rates, sunday) == Decimal("1.20")
+
+    def test_no_rate_on_or_before_raises_fx_error_naming_date(self):
+        """A lookup before the first published rate raises FxError."""
+        rates = {date(2026, 7, 10): Decimal("1.20")}
+        with pytest.raises(fx.FxError, match="2026-07-09"):
+            fx.rate_on(rates, date(2026, 7, 9))
+
+
+class TestRateToBase:
+    """Unit tests for fx.rate_to_base (cross-rate orientation)."""
+
+    def test_usd_to_eur_is_reciprocal_of_published_rate(self):
+        """cur=USD base=EUR yields 1/ecb(USD)."""
+        rates = {"USD": {date(2026, 7, 10): Decimal("1.25")}}
+        assert fx.rate_to_base(
+            rates, "USD", "EUR", date(2026, 7, 10)
+        ) == Decimal("0.8")
+
+    def test_usd_to_gbp_is_ecb_cross_rate(self):
+        """cur=USD base=GBP yields ecb(GBP)/ecb(USD)."""
+        rates = {
+            "USD": {date(2026, 7, 10): Decimal("1.25")},
+            "GBP": {date(2026, 7, 10): Decimal("0.80")},
+        }
+        assert fx.rate_to_base(
+            rates, "USD", "GBP", date(2026, 7, 10)
+        ) == Decimal("0.64")
+
+    def test_precision_is_exact_decimal(self):
+        """The rate keeps full Decimal precision (no float artifacts)."""
+        rates = {"USD": {date(2026, 7, 10): Decimal("1.1419")}}
+        result = fx.rate_to_base(rates, "USD", "EUR", date(2026, 7, 10))
+        assert result == Decimal(1) / Decimal("1.1419")
+
+
+class TestFxDate:
+    """Unit tests for fx.fx_date (berlin vs utc calendar date)."""
+
+    def test_berlin_converts_summer_utc_2230_to_next_day(self):
+        """22:30 UTC in July (CEST, UTC+2) is 00:30 the next day in Berlin."""
+        dt = datetime(2026, 7, 13, 22, 30)
+        assert fx.fx_date(dt, "berlin") == date(2026, 7, 14)
+
+    def test_utc_keeps_the_recorded_date(self):
+        """utc mode takes the naive datetime's date verbatim."""
+        dt = datetime(2026, 7, 13, 22, 30)
+        assert fx.fx_date(dt, "utc") == date(2026, 7, 13)
+
+    def test_berlin_winter_offset_is_plus_one_hour(self):
+        """23:30 UTC in January (CET, UTC+1) is 00:30 the next day in Berlin."""
+        dt = datetime(2026, 1, 15, 23, 30)
+        assert fx.fx_date(dt, "berlin") == date(2026, 1, 16)
+        assert fx.fx_date(dt, "utc") == date(2026, 1, 15)
+
+
+class TestEnsureRates:
+    """Unit tests for fx.ensure_rates (window coverage + single fetch)."""
+
+    def test_window_covering_needed_dates_does_not_fetch(
+        self, fx_cache_dir
+    ):
+        """A needed date inside a recorded fetch window whose range
+        contains a rate <= the date is covered — requests.get is never
+        called."""
+        _seed_fx_cache(
+            fx_cache_dir, "USD",
+            {date(2026, 7, 6): "1.10", date(2026, 7, 10): "1.20"},
+            windows=[(date(2026, 7, 6), date(2026, 7, 10))],
+        )
+        with patch("tradestation.fx.requests.get") as mock_get:
+            rates = fx.ensure_rates(
+                "USD", {date(2026, 7, 8)}, today=date(2026, 7, 15)
+            )
+        mock_get.assert_not_called()
+        assert fx.rate_on(rates, date(2026, 7, 8)) == Decimal("1.10")
+
+    def test_weekend_covered_by_window_spanning_it_does_not_fetch(
+        self, fx_cache_dir
+    ):
+        """A needed Sunday served by Friday's rate is covered without a
+        fetch when a recorded window reaches the needed date (a window
+        that only reached Friday could not prove the weekend empty;
+        windows end on publication dates, so Monday's pub is what proves
+        the weekend)."""
+        _seed_fx_cache(
+            fx_cache_dir, "USD",
+            {date(2026, 7, 10): "1.20", date(2026, 7, 13): "1.30"},
+            windows=[(date(2026, 7, 6), date(2026, 7, 13))],
+        )
+        sunday = date(2026, 7, 12)
+        assert sunday.weekday() == 6
+        with patch("tradestation.fx.requests.get") as mock_get:
+            rates = fx.ensure_rates(
+                "USD", {sunday}, today=date(2026, 7, 12)
+            )
+        mock_get.assert_not_called()
+        assert fx.rate_on(rates, sunday) == Decimal("1.20")
+
+    def test_window_not_reaching_needed_date_triggers_one_fetch(
+        self, fx_cache_dir
+    ):
+        """A needed date past every recorded window's end is uncovered:
+        exactly one fetch, then the merged series serves it."""
+        _seed_fx_cache(
+            fx_cache_dir, "USD",
+            {date(2026, 7, 6): "1.10"},
+            windows=[(date(2026, 7, 1), date(2026, 7, 6))],
+        )
+        fetched = _ecb_csv({date(2026, 7, 9): "1.30"})
+        with patch(
+            "tradestation.fx.requests.get",
+            return_value=_fx_response(fetched),
+        ) as mock_get:
+            rates = fx.ensure_rates(
+                "USD", {date(2026, 7, 9)}, today=date(2026, 7, 9)
+            )
+        assert mock_get.call_count == 1
+        assert rates[date(2026, 7, 9)] == Decimal("1.30")
+        assert rates[date(2026, 7, 6)] == Decimal("1.10")  # cache merged
+        # the recorded windows merged into one covering range
+        data = json.loads((fx_cache_dir / "USD.json").read_text())
+        assert data["windows"] == [["2026-06-25", "2026-07-09"]]
+
+    def test_needed_range_beyond_cache_triggers_exactly_one_fetch(
+        self, fx_cache_dir
+    ):
+        """An uncovered needed date causes exactly one fetch over
+        [min(needed) - 14d, today], then the merged series serves it."""
+        _seed_fx_cache(
+            fx_cache_dir, "USD",
+            {date(2026, 7, 6): "1.10"},
+            windows=[(date(2026, 7, 1), date(2026, 7, 6))],
+        )
+        fetched = _ecb_csv({date(2026, 7, 20): "1.30"})
+        with patch(
+            "tradestation.fx.requests.get",
+            return_value=_fx_response(fetched),
+        ) as mock_get:
+            rates = fx.ensure_rates(
+                "USD", {date(2026, 7, 20)}, today=date(2026, 7, 20)
+            )
+        assert mock_get.call_count == 1
+        # fetch window: min(needed) - 14d lookback margin through today
+        assert mock_get.call_args.kwargs["params"]["startPeriod"] == (
+            "2026-07-06"
+        )
+        assert mock_get.call_args.kwargs["params"]["endPeriod"] == (
+            "2026-07-20"
+        )
+        assert rates[date(2026, 7, 20)] == Decimal("1.30")
+        assert rates[date(2026, 7, 6)] == Decimal("1.10")  # cache merged
+
+    def test_interior_window_hole_triggers_one_fetch(
+        self, fx_cache_dir
+    ):
+        """Hole regression: rates exist in January and March with matching
+        windows, but the needed February date sits in a fetched-never hole
+        between the windows — the cache must NOT silently serve January's
+        stale rate; it fetches once and serves February's real rate."""
+        _seed_fx_cache(
+            fx_cache_dir, "USD",
+            {
+                date(2026, 1, 5): "1.01",
+                date(2026, 1, 6): "1.02",
+                date(2026, 1, 7): "1.03",
+                date(2026, 1, 8): "1.04",
+                date(2026, 1, 9): "1.05",
+                date(2026, 3, 10): "1.31",
+                date(2026, 3, 11): "1.32",
+                date(2026, 3, 12): "1.33",
+                date(2026, 3, 13): "1.34",
+            },
+            windows=[
+                (date(2026, 1, 5), date(2026, 1, 9)),
+                (date(2026, 2, 26), date(2026, 3, 13)),
+            ],
+        )
+        needed = date(2026, 2, 20)
+        # The ECB returns every publication in the requested range, so the
+        # response also re-contains March's pubs — the recorded window
+        # then extends to max(fetched) and merges with the March window.
+        fetched = _ecb_csv({
+            date(2026, 2, 19): "1.21",
+            date(2026, 2, 20): "1.22",
+            # continuous publications — a >14d hole in the merged series
+            # would now split the recorded window (F1)
+            date(2026, 2, 24): "1.24",
+            date(2026, 3, 2): "1.30",
+            date(2026, 3, 10): "1.31",
+            date(2026, 3, 11): "1.32",
+            date(2026, 3, 12): "1.33",
+            date(2026, 3, 13): "1.34",
+        })
+        with patch(
+            "tradestation.fx.requests.get",
+            return_value=_fx_response(fetched),
+        ) as mock_get:
+            rates = fx.ensure_rates(
+                "USD", {needed}, today=date(2026, 3, 13)
+            )
+        assert mock_get.call_count == 1
+        # fetch anchors at min(needed) - 14d and runs through today
+        assert mock_get.call_args.kwargs["params"]["startPeriod"] == (
+            "2026-02-06"
+        )
+        assert mock_get.call_args.kwargs["params"]["endPeriod"] == (
+            "2026-03-13"
+        )
+        assert fx.rate_on(rates, needed) == Decimal("1.22")  # not 1.05 stale
+        # the new window merged with the March window; January stays put
+        data = json.loads((fx_cache_dir / "USD.json").read_text())
+        assert data["windows"] == [
+            ["2026-01-05", "2026-01-09"],
+            ["2026-02-06", "2026-03-13"],
+        ]
+
+    def test_window_starting_on_needed_date_with_no_rate_is_uncovered(
+        self, fx_cache_dir
+    ):
+        """Pre-Easter-Monday straggler: the only window STARTS on the
+        needed date and holds no rate <= it (Good Friday publishes
+        nothing) — the true last-published rate precedes the window, so
+        coverage cannot be proven and a fetch must happen."""
+        _seed_fx_cache(
+            fx_cache_dir, "USD",
+            {date(2026, 4, 6): "1.50"},
+            windows=[(date(2026, 4, 3), date(2026, 4, 6))],
+        )
+        needed = date(2026, 4, 3)  # Good Friday — no publication
+        fetched = _ecb_csv({date(2026, 4, 2): "1.49"})  # Holy Thursday
+        with patch(
+            "tradestation.fx.requests.get",
+            return_value=_fx_response(fetched),
+        ) as mock_get:
+            rates = fx.ensure_rates(
+                "USD", {needed}, today=date(2026, 4, 6)
+            )
+        assert mock_get.call_count == 1
+        assert fx.rate_on(rates, needed) == Decimal("1.49")
+
+    def test_legacy_cache_without_windows_refetches_and_upgrades(
+        self, fx_cache_dir
+    ):
+        """A v1 cache (rates only, no "windows") keeps its rates but
+        proves nothing — the needed date triggers a fetch and the file is
+        rewritten with a windows key."""
+        _seed_fx_cache(
+            fx_cache_dir, "USD", {date(2026, 7, 6): "1.10"}
+        )  # no windows
+        fetched = _ecb_csv({date(2026, 7, 6): "1.10", date(2026, 7, 9): "1.30"})
+        with patch(
+            "tradestation.fx.requests.get",
+            return_value=_fx_response(fetched),
+        ) as mock_get:
+            rates = fx.ensure_rates(
+                "USD", {date(2026, 7, 9)}, today=date(2026, 7, 9)
+            )
+        assert mock_get.call_count == 1
+        assert rates[date(2026, 7, 9)] == Decimal("1.30")
+        data = json.loads((fx_cache_dir / "USD.json").read_text())
+        assert data["windows"] == [["2026-06-25", "2026-07-09"]]
+
+    @pytest.mark.parametrize("bad_value", ["-1.5", "0", "abc", "NaN"])
+    def test_garbage_rate_value_treats_whole_cache_as_corrupt(
+        self, fx_cache_dir, caplog, bad_value
+    ):
+        """A negative, zero, non-Decimal, or non-finite rate value
+        invalidates the WHOLE cache (rates + windows): warning + refetch.
+        Kills silently served negative rates and DivisionByZero."""
+        _seed_fx_cache(
+            fx_cache_dir, "USD",
+            {date(2026, 7, 6): "1.10", date(2026, 7, 9): bad_value},
+            windows=[(date(2026, 7, 1), date(2026, 7, 15))],
+        )
+        fetched = _ecb_csv({date(2026, 7, 9): "1.30"})
+        with (
+            caplog.at_level(logging.WARNING, logger="tradestation.fx"),
+            patch(
+                "tradestation.fx.requests.get",
+                return_value=_fx_response(fetched),
+            ) as mock_get,
+        ):
+            rates = fx.ensure_rates(
+                "USD", {date(2026, 7, 9)}, today=date(2026, 7, 9)
+            )
+        assert mock_get.call_count == 1
+        assert rates[date(2026, 7, 9)] == Decimal("1.30")
+        assert any("corrupt FX cache" in r.message for r in caplog.records)
+
+    def test_corrupt_cache_warns_and_is_treated_as_empty(
+        self, fx_cache_dir, caplog
+    ):
+        """An unparseable cache file logs a warning and is refetched."""
+        fx_cache_dir.mkdir(parents=True)
+        (fx_cache_dir / "USD.json").write_text("not json", encoding="utf-8")
+        fetched = _ecb_csv({date(2026, 7, 9): "1.30"})
+        with (
+            caplog.at_level(logging.WARNING, logger="tradestation.fx"),
+            patch(
+                "tradestation.fx.requests.get",
+                return_value=_fx_response(fetched),
+            ) as mock_get,
+        ):
+            rates = fx.ensure_rates(
+                "USD", {date(2026, 7, 9)}, today=date(2026, 7, 9)
+            )
+        assert mock_get.call_count == 1
+        assert rates[date(2026, 7, 9)] == Decimal("1.30")
+        assert any("corrupt FX cache" in r.message for r in caplog.records)
+
+    @pytest.mark.usefixtures("fx_cache_dir")
+    def test_empty_ecb_response_raises_fx_error(self):
+        """An ECB series with no observations for an unknown currency raises
+        FxError."""
+        empty_csv = "TIME_PERIOD,OBS_VALUE\n"
+        with (
+            patch(
+                "tradestation.fx.requests.get",
+                return_value=_fx_response(empty_csv),
+            ),
+            pytest.raises(fx.FxError, match="no rates for XXX"),
+        ):
+            fx.ensure_rates(
+                "XXX", {date(2026, 7, 9)}, today=date(2026, 7, 9)
+            )
+
+    def test_cache_file_written_atomically_as_readable_json(
+        self, fx_cache_dir
+    ):
+        """After a fetch the v3 cache (version + rates + windows) is
+        valid JSON and no .tmp file remains."""
+        fetched = _ecb_csv({date(2026, 7, 9): "1.30"})
+        with patch(
+            "tradestation.fx.requests.get",
+            return_value=_fx_response(fetched),
+        ):
+            fx.ensure_rates(
+                "USD", {date(2026, 7, 9)}, today=date(2026, 7, 9)
+            )
+        path = fx_cache_dir / "USD.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data == {
+            "version": 3,
+            "rates": {"2026-07-09": "1.30"},
+            "windows": [["2026-06-25", "2026-07-09"]],
+        }
+        assert not list(fx_cache_dir.glob("*.tmp"))
+
+    def test_fetch_records_window_ending_at_last_returned_publication(
+        self, fx_cache_dir
+    ):
+        """Evidence window: the fetch REQUESTS through today but the
+        response only publishes through Friday — the recorded window ends
+        at the newest returned publication, and the needed date beyond it
+        is provisional (served Friday's rate), not an error."""
+        friday = date(2026, 7, 10)
+        assert friday.weekday() == 4
+        monday = date(2026, 7, 13)
+        fetched = _ecb_csv({friday: "1.10"})
+        with patch(
+            "tradestation.fx.requests.get",
+            return_value=_fx_response(fetched),
+        ) as mock_get:
+            rates = fx.ensure_rates(
+                "USD", {monday}, today=monday
+            )
+        assert mock_get.call_count == 1
+        # request end still reaches today (ECB may already have it)
+        assert mock_get.call_args.kwargs["params"]["endPeriod"] == "2026-07-13"
+        # needed Monday uncovered but provisional (a rate <= d exists)
+        # → no error, served the last published rate
+        assert fx.rate_on(rates, monday) == Decimal("1.10")
+        # the window ends at the last RETURNED publication, not today
+        data = json.loads((fx_cache_dir / "USD.json").read_text())
+        assert data["windows"] == [["2026-06-29", "2026-07-10"]]
+
+    def test_rerun_after_publication_refetches_and_serves_new_rate(
+        self, fx_cache_dir
+    ):
+        """Delayed-publication regression (self-heal): a fetch whose
+        response lacks today's pub records a window ending yesterday; a
+        same-day re-run after publication performs a REAL refetch and
+        serves the new rate."""
+        _seed_fx_cache(
+            fx_cache_dir, "USD",
+            {date(2026, 7, 14): "1.10"},
+            windows=[(date(2026, 7, 1), date(2026, 7, 14))],
+        )
+        fetched = _ecb_csv(
+            {date(2026, 7, 14): "1.10", date(2026, 7, 15): "1.20"}
+        )
+        with patch(
+            "tradestation.fx.requests.get",
+            return_value=_fx_response(fetched),
+        ) as mock_get:
+            rates = fx.ensure_rates(
+                "USD", {date(2026, 7, 15)}, today=date(2026, 7, 15)
+            )
+        assert mock_get.call_count == 1  # real refetch, not a cache hit
+        assert rates[date(2026, 7, 15)] == Decimal("1.20")
+        # window merge extended coverage through today's publication
+        data = json.loads((fx_cache_dir / "USD.json").read_text())
+        assert data["windows"] == [["2026-07-01", "2026-07-15"]]
+
+        # next-day run: the same needed date is now < today and covered by
+        # the extended window — zero fetches, true rate served
+        with patch("tradestation.fx.requests.get") as mock_get2:
+            rates2 = fx.ensure_rates(
+                "USD", {date(2026, 7, 15)}, today=date(2026, 7, 16)
+            )
+        mock_get2.assert_not_called()
+        assert fx.rate_on(rates2, date(2026, 7, 15)) == Decimal("1.20")
+
+    def test_window_ending_on_non_rate_date_is_dropped_and_refetched(
+        self, fx_cache_dir, caplog
+    ):
+        """F1: a window whose end is NOT itself a published rate date is
+        legacy-inflated or corrupt — dropped on load (rates kept, info
+        logged), so the needed date is uncovered and exactly one refetch
+        rebuilds an evidence-bounded window."""
+        _seed_fx_cache(
+            fx_cache_dir, "USD",
+            {date(2026, 7, 10): "1.20", date(2026, 7, 14): "1.30"},
+            windows=[(date(2026, 7, 6), date(2026, 7, 15))],
+        )  # Jul 15 never published — the window overclaims it
+        fetched = _ecb_csv({date(2026, 7, 14): "1.30"})
+        with (
+            caplog.at_level(logging.INFO, logger="tradestation.fx"),
+            patch(
+                "tradestation.fx.requests.get",
+                return_value=_fx_response(fetched),
+            ) as mock_get,
+        ):
+            rates = fx.ensure_rates(
+                "USD", {date(2026, 7, 15)}, today=date(2026, 7, 15)
+            )
+        assert mock_get.call_count == 1
+        assert any(
+            "Dropping overclaimed window" in r.message
+            for r in caplog.records
+        )
+        # needed date stays provisional on the last published rate
+        assert fx.rate_on(rates, date(2026, 7, 15)) == Decimal("1.30")
+        # the overclaimed window is gone; the new window ends on the
+        # newest publication the fetch actually returned
+        data = json.loads((fx_cache_dir / "USD.json").read_text())
+        assert data["windows"] == [["2026-07-01", "2026-07-14"]]
+
+    def test_legacy_overclaimed_window_end_beyond_last_rate_heals(
+        self, fx_cache_dir
+    ):
+        """F1 migration: the real USD.json shape — rates through Friday
+        2026-10-16 but a window claiming through Saturday 2026-10-17 (no
+        publication possible). The window is dropped and one fetch heals
+        the cache into an evidence-bounded window."""
+        _seed_fx_cache(
+            fx_cache_dir, "USD",
+            {date(2026, 10, 15): "1.15", date(2026, 10, 16): "1.16"},
+            windows=[(date(2026, 10, 2), date(2026, 10, 17))],
+        )
+        fetched = _ecb_csv(
+            {date(2026, 10, 15): "1.15", date(2026, 10, 16): "1.16"}
+        )
+        with patch(
+            "tradestation.fx.requests.get",
+            return_value=_fx_response(fetched),
+        ) as mock_get:
+            rates = fx.ensure_rates(
+                "USD", {date(2026, 10, 16)}, today=date(2026, 10, 17)
+            )
+        assert mock_get.call_count == 1  # one refetch, not a silent hit
+        assert fx.rate_on(rates, date(2026, 10, 16)) == Decimal("1.16")
+        # honest window: fetch start (min needed - 14d) through the last
+        # returned publication — never the claimed Saturday
+        data = json.loads((fx_cache_dir / "USD.json").read_text())
+        assert data["windows"] == [["2026-10-02", "2026-10-16"]]
+
+    @pytest.mark.usefixtures("fx_cache_dir")
+    def test_uncovered_needed_date_with_no_prior_rate_raises(self):
+        """A needed date that stays uncovered after the fetch AND has no
+        cached rate on or before it is a REAL HOLE → FxError naming
+        currency + date."""
+        fetched = _ecb_csv({date(2026, 7, 15): "1.30"})  # nothing <= Jul 8
+        with (
+            patch(
+                "tradestation.fx.requests.get",
+                return_value=_fx_response(fetched),
+            ),
+            pytest.raises(fx.FxError) as exc_info,
+        ):
+            fx.ensure_rates(
+                "USD", {date(2026, 7, 8)}, today=date(2026, 7, 15)
+            )
+        assert "USD" in str(exc_info.value)
+        assert "2026-07-08" in str(exc_info.value)
+
+    def test_fetch_window_splits_at_interior_rate_gap(
+        self, fx_cache_dir
+    ):
+        """F1 writer side: a >14d hole between consecutive merged rates
+        inside the fetched span is missing data, not a publication gap —
+        the recorded window splits there so the hole is never claimed,
+        and a needed date inside it stays uncovered-but-provisional."""
+        needed = date(2026, 8, 1)   # Saturday, inside the hole
+        today = date(2026, 9, 1)
+        # fetch start = needed - 14d = 2026-07-18; the response leaves a
+        # Jul 20 → Aug 10 hole (21 days) no window may claim
+        fetched = _ecb_csv({
+            date(2026, 7, 20): "1.10",
+            date(2026, 8, 10): "1.20",
+            date(2026, 9, 1): "1.30",
+        })
+        with patch(
+            "tradestation.fx.requests.get",
+            return_value=_fx_response(fetched),
+        ) as mock_get:
+            rates = fx.ensure_rates("USD", {needed}, today=today)
+        assert mock_get.call_count == 1
+        data = json.loads((fx_cache_dir / "USD.json").read_text())
+        assert data["windows"] == [
+            ["2026-07-18", "2026-07-20"],
+            ["2026-08-10", "2026-08-10"],
+            ["2026-09-01", "2026-09-01"],
+        ]
+        # needed date sits in the unclaimed hole: uncovered but a prior
+        # rate exists -> provisional, served the last published rate
+        assert not fx._is_covered(needed, rates, [
+            (date(2026, 7, 18), date(2026, 7, 20)),
+            (date(2026, 8, 10), date(2026, 8, 10)),
+            (date(2026, 9, 1), date(2026, 9, 1)),
+        ])
+        assert fx.rate_on(rates, needed) == Decimal("1.10")
+
+    def test_save_resplits_windows_merged_across_a_rate_hole(
+        self, fx_cache_dir
+    ):
+        """Seam-adjacency regression: _merge_windows joins a new segment
+        to an existing window ending exactly one day before the
+        segment's start — a merge that would SPAN a >14d rate hole.
+        _save_cache re-splits on the rate data itself, so the file never
+        records a window claiming an unfetched hole."""
+        _seed_fx_cache(
+            fx_cache_dir, "USD",
+            {date(2026, 1, 5): "1.05", date(2026, 1, 9): "1.06"},
+            windows=[(date(2026, 1, 5), date(2026, 1, 9))],
+        )
+        # needed Jan 24 -> fetch start Jan 10 — one day past the old
+        # window's end, so the new segment [Jan-10, Jan-26] merges with
+        # [Jan-5, Jan-9] into [Jan-5, Jan-26], spanning the 15-day
+        # rate hole Jan-9 -> Jan-24
+        fetched = _ecb_csv({
+            date(2026, 1, 24): "1.20",
+            date(2026, 1, 26): "1.25",
+        })
+        with patch(
+            "tradestation.fx.requests.get",
+            return_value=_fx_response(fetched),
+        ) as mock_get:
+            rates = fx.ensure_rates(
+                "USD", {date(2026, 1, 24)}, today=date(2026, 1, 30)
+            )
+        assert mock_get.call_count == 1
+        assert fx.rate_on(rates, date(2026, 1, 24)) == Decimal("1.20")
+        # the saved windows are re-split at the hole: [Jan-5, Jan-9]
+        # honest, [Jan-24, Jan-26] starts at its own first rate
+        data = json.loads((fx_cache_dir / "USD.json").read_text())
+        assert data["windows"] == [
+            ["2026-01-05", "2026-01-09"],
+            ["2026-01-24", "2026-01-26"],
+        ]
+        # and a second load keeps both windows (no drop, no refetch)
+        with patch("tradestation.fx.requests.get") as mock_get2:
+            fx.ensure_rates(
+                "USD", {date(2026, 1, 24)}, today=date(2026, 1, 30)
+            )
+        mock_get2.assert_not_called()
+
+    @pytest.mark.usefixtures("fx_cache_dir")
+    def test_needed_date_in_gap_with_no_prior_rate_raises(self):
+        """F1 writer side, hole case: a needed date inside the split-out
+        gap with NO cached rate <= it is a real hole -> FxError."""
+        fetched = _ecb_csv({
+            date(2026, 8, 10): "1.20",
+            date(2026, 9, 1): "1.30",
+        })
+        with (
+            patch(
+                "tradestation.fx.requests.get",
+                return_value=_fx_response(fetched),
+            ),
+            pytest.raises(fx.FxError, match="2026-08-05"),
+        ):
+            fx.ensure_rates(
+                "USD", {date(2026, 8, 5)}, today=date(2026, 9, 1)
+            )
+
+    def test_window_spanning_interior_rate_gap_is_dropped_and_refetched(
+        self, fx_cache_dir, caplog
+    ):
+        """F1 loader side: a window spanning a >14d hole between
+        consecutive cached rates claims missing data — dropped on load
+        (rates kept, info logged), so the needed date refetches once.
+        An honest window alongside it is untouched."""
+        _seed_fx_cache(
+            fx_cache_dir, "USD",
+            {
+                date(2026, 6, 5): "1.05",
+                date(2026, 7, 10): "1.10",
+                date(2026, 8, 3): "1.20",
+            },
+            windows=[
+                (date(2026, 6, 1), date(2026, 6, 5)),   # honest
+                (date(2026, 7, 6), date(2026, 8, 3)),   # Jul10→Aug3 = 24d
+            ],
+        )
+        needed = date(2026, 7, 21)  # inside the dishonest window's hole
+        fetched = _ecb_csv({
+            date(2026, 7, 21): "1.15",
+            date(2026, 8, 3): "1.20",
+        })
+        with (
+            caplog.at_level(logging.INFO, logger="tradestation.fx"),
+            patch(
+                "tradestation.fx.requests.get",
+                return_value=_fx_response(fetched),
+            ) as mock_get,
+        ):
+            rates = fx.ensure_rates(
+                "USD", {needed}, today=date(2026, 8, 3)
+            )
+        assert mock_get.call_count == 1
+        assert any(
+            "interior rate gap" in r.message for r in caplog.records
+        )
+        assert fx.rate_on(rates, needed) == Decimal("1.15")
+        # the honest window survives untouched; the refetch records one
+        # window (Jul 21 → Aug 3 is 13 days — under the gap limit)
+        data = json.loads((fx_cache_dir / "USD.json").read_text())
+        assert data["windows"] == [
+            ["2026-06-01", "2026-06-05"],
+            ["2026-07-07", "2026-08-03"],
+        ]
+
+    def test_cache_without_version_key_still_loads(self, fx_cache_dir):
+        """F3: a legacy cache with no "version" key loads under the same
+        rules — covered needed dates hit the cache without a fetch."""
+        _seed_fx_cache(
+            fx_cache_dir, "USD",
+            {date(2026, 7, 6): "1.10", date(2026, 7, 10): "1.20"},
+            windows=[(date(2026, 7, 6), date(2026, 7, 10))],
+        )  # no "version" key — legacy
+        with patch("tradestation.fx.requests.get") as mock_get:
+            rates = fx.ensure_rates(
+                "USD", {date(2026, 7, 8)}, today=date(2026, 7, 15)
+            )
+        mock_get.assert_not_called()
+        assert fx.rate_on(rates, date(2026, 7, 8)) == Decimal("1.10")
+
+    def test_window_pair_with_wrong_length_is_whole_cache_corrupt(
+        self, fx_cache_dir, caplog
+    ):
+        """A windows entry that is not a 2-element pair is malformed like
+        any other corrupt shape: warning + whole cache treated as empty
+        + refetch."""
+        cache_dir = fx_cache_dir
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        (cache_dir / "USD.json").write_text(json.dumps({
+            "version": 3,
+            "rates": {"2026-07-09": "1.30"},
+            "windows": [["2026-07-01", "2026-07-09", "extra"]],
+        }), encoding="utf-8")
+        fetched = _ecb_csv({date(2026, 7, 9): "1.30"})
+        with (
+            caplog.at_level(logging.WARNING, logger="tradestation.fx"),
+            patch(
+                "tradestation.fx.requests.get",
+                return_value=_fx_response(fetched),
+            ) as mock_get,
+        ):
+            rates = fx.ensure_rates(
+                "USD", {date(2026, 7, 9)}, today=date(2026, 7, 9)
+            )
+        assert mock_get.call_count == 1
+        assert rates[date(2026, 7, 9)] == Decimal("1.30")
+        assert any("corrupt FX cache" in r.message for r in caplog.records)
+
+
+class TestEcbPublicationPossible:
+    """Unit tests for fx.ecb_publication_possible (TARGET working days)."""
+
+    @pytest.mark.parametrize("d", [
+        date(2026, 1, 1),    # New Year's Day (Thursday)
+        date(2026, 4, 3),    # Good Friday
+        date(2026, 4, 6),    # Easter Monday
+        date(2026, 5, 1),    # Labour Day (Friday)
+        date(2026, 12, 25),  # Christmas Day (Friday)
+        date(2026, 12, 26),  # Boxing Day — also a Saturday
+        date(2026, 7, 18),   # plain Saturday
+        date(2026, 7, 19),   # plain Sunday
+    ])
+    def test_no_publication_possible_returns_false(self, d):
+        assert not fx.ecb_publication_possible(d)
+
+    @pytest.mark.parametrize("d", [
+        date(2026, 7, 15),   # plain Wednesday
+        date(2026, 4, 7),    # Tuesday after Easter
+        date(2026, 12, 24),  # Christmas Eve IS a TARGET working day
+    ])
+    def test_target_working_day_returns_true(self, d):
+        assert fx.ecb_publication_possible(d)
+
+    @pytest.mark.parametrize("year, expected", [
+        (2024, date(2024, 3, 31)),
+        (2025, date(2025, 4, 20)),
+        (2026, date(2026, 4, 5)),
+        (2027, date(2027, 3, 28)),
+    ])
+    def test_easter_sunday_pins_known_dates(self, year, expected):
+        """Pin the Anonymous Gregorian computus against known Easter
+        Sundays — Good Friday/Easter Monday derive from it."""
+        assert fx._easter_sunday(year) == expected
+
+
+class TestMergeWindows:
+    """Pins for fx._merge_windows' contiguity rule (F5)."""
+
+    def test_one_missing_day_gap_does_not_merge(self):
+        """[Jan1-5] + [Jan7-10]: Jan 6 was never fetched — merging would
+        fabricate coverage, so the two windows must stay separate."""
+        windows = [
+            (date(2026, 1, 1), date(2026, 1, 5)),
+            (date(2026, 1, 7), date(2026, 1, 10)),
+        ]
+        assert fx._merge_windows(windows) == windows
+
+    def test_contiguous_windows_merge(self):
+        """[Jan1-5] + [Jan6-10]: zero missing days → merged into one."""
+        assert fx._merge_windows([
+            (date(2026, 1, 1), date(2026, 1, 5)),
+            (date(2026, 1, 6), date(2026, 1, 10)),
+        ]) == [(date(2026, 1, 1), date(2026, 1, 10))]
+
+
+@pytest.mark.usefixtures("fx_cache_dir")
+class TestConvertFx:
+    """Integration tests for convert_orders_csv with fx_base set."""
+
+    def _convert_fx(self, tmp_path, rows, fx_base="EUR",
+                    fx_date_mode="berlin", out_name="out.csv") -> Path:
+        input_path = _write_orders_csv(tmp_path / "orders.csv", rows)
+        output_path = tmp_path / out_name
+        convert_orders_csv(
+            input_path, output_path, {},
+            fx_base=fx_base, fx_date_mode=fx_date_mode,
+        )
+        return output_path
+
+    def test_fx_eur_emits_reciprocal_ecb_rate_quantized_8dp(
+        self, tmp_path
+    ):
+        """--fx EUR fills Conversion rate with 1/ecb(USD) at 8 decimals."""
+        csv_text = _ecb_csv({date(2026, 2, 6): "1.1419"})
+        with patch(
+            "tradestation.fx.requests.get",
+            return_value=_fx_response(csv_text),
+        ):
+            out = self._convert_fx(tmp_path, [_order_row()])
+        _, data = _read_output(out)
+        trade = dict(zip(TDPRO_COLUMNS, data[0], strict=True))
+        assert trade["Conversion rate"] == _expected_rate_cell("1.1419")
+
+    def test_row_with_currency_equal_to_fx_base_gets_empty_cell(
+        self, tmp_path
+    ):
+        """A row whose Currency already is the base gets an empty cell."""
+        rows = [_order_row(Currency="EUR")]
+        with patch("tradestation.fx.requests.get") as mock_get:
+            out = self._convert_fx(tmp_path, rows)
+        mock_get.assert_not_called()  # EUR needs no series at all
+        _, data = _read_output(out)
+        trade = dict(zip(TDPRO_COLUMNS, data[0], strict=True))
+        assert trade["Currency"] == "EUR"
+        assert trade["Conversion rate"] == ""
+
+    def test_two_fills_on_different_days_get_different_rates(
+        self, tmp_path
+    ):
+        """Each fill is converted at its own date's ECB rate."""
+        csv_text = _ecb_csv({
+            date(2026, 2, 5): "1.10",
+            date(2026, 2, 6): "1.20",
+        })
+        rows = [
+            _order_row(OrderID="d1", datetime="2026-02-05T10:00:00"),
+            _order_row(OrderID="d2", datetime="2026-02-06T10:00:00"),
+        ]
+        with patch(
+            "tradestation.fx.requests.get",
+            return_value=_fx_response(csv_text),
+        ):
+            out = self._convert_fx(tmp_path, rows)
+        _, data = _read_output(out)
+        rates = [dict(zip(TDPRO_COLUMNS, r, strict=True))["Conversion rate"]
+                 for r in data]
+        assert rates[0] == _expected_rate_cell("1.10")
+        assert rates[1] == _expected_rate_cell("1.20")
+        assert rates[0] != rates[1]
+
+    def test_fx_date_mode_berlin_vs_utc_boundary_fill(
+        self, tmp_path
+    ):
+        """A fill at 2026-07-12T22:30 UTC (Sunday) looks up Monday's rate
+        under berlin and Friday's under utc."""
+        csv_text = _ecb_csv({
+            date(2026, 7, 10): "1.10",  # Friday
+            date(2026, 7, 13): "1.30",  # Monday
+        })
+        rows = [_order_row(datetime="2026-07-12T22:30:00")]
+        with patch(
+            "tradestation.fx.requests.get",
+            return_value=_fx_response(csv_text),
+        ):
+            out_berlin = self._convert_fx(
+                tmp_path, rows, fx_date_mode="berlin", out_name="berlin.csv"
+            )
+            out_utc = self._convert_fx(
+                tmp_path, rows, fx_date_mode="utc", out_name="utc.csv"
+            )
+        berlin_rate = dict(
+            zip(TDPRO_COLUMNS, _read_output(out_berlin)[1][0], strict=True)
+        )["Conversion rate"]
+        utc_rate = dict(
+            zip(TDPRO_COLUMNS, _read_output(out_utc)[1][0], strict=True)
+        )["Conversion rate"]
+        assert berlin_rate == _expected_rate_cell("1.30")
+        assert utc_rate == _expected_rate_cell("1.10")
+
+    def test_missing_rate_for_needed_date_raises_tdpro_error(
+        self, tmp_path
+    ):
+        """A needed date with no ECB rate within 14 days before it raises
+        TdproError naming the currency AND the date."""
+        csv_text = _ecb_csv({date(2026, 7, 7): "1.10"})  # day after the fill
+        rows = [_order_row(datetime="2026-07-06T10:00:00")]
+        input_path = _write_orders_csv(tmp_path / "orders.csv", rows)
+        with (
+            patch(
+                "tradestation.fx.requests.get",
+                return_value=_fx_response(csv_text),
+            ),
+            pytest.raises(TdproError) as exc_info,
+        ):
+            convert_orders_csv(
+                input_path, tmp_path / "out.csv", {}, fx_base="EUR"
+            )
+        assert "USD" in str(exc_info.value)
+        assert "2026-07-06" in str(exc_info.value)
+
+    def test_fx_base_none_leaves_column_empty(self, tmp_path):
+        """Without fx_base the Conversion rate column stays empty."""
+        out = _convert(tmp_path, [_order_row()])
+        _, data = _read_output(out)
+        trade = dict(zip(TDPRO_COLUMNS, data[0], strict=True))
+        assert trade["Conversion rate"] == ""
+
+    def test_blank_currency_under_fx_raises_tdpro_error_naming_order_id(
+        self, tmp_path
+    ):
+        """An executed row with a blank Currency under --fx fails loud —
+        a silent empty rate cell would resurrect the stale-rate bug."""
+        rows = [
+            _order_row(OrderID="blank1", Currency="  "),
+            _order_row(OrderID="blank2", Currency=""),
+        ]
+        input_path = _write_orders_csv(tmp_path / "orders.csv", rows)
+        with (
+            patch("tradestation.fx.requests.get") as mock_get,
+            pytest.raises(TdproError) as exc_info,
+        ):
+            convert_orders_csv(
+                input_path, tmp_path / "out.csv", {}, fx_base="EUR"
+            )
+        assert "blank1" in str(exc_info.value)
+        assert "blank2" in str(exc_info.value)
+        mock_get.assert_not_called()  # fail before any ECB request
+
+    def test_blank_currency_without_fx_stays_silent_empty(self, tmp_path):
+        """Without --fx, a blank Currency behaves exactly as before: the row
+        converts with empty Currency and Conversion rate cells."""
+        rows = [_order_row(OrderID="b1", Currency="")]
+        out = _convert(tmp_path, rows)
+        _, data = _read_output(out)
+        trade = dict(zip(TDPRO_COLUMNS, data[0], strict=True))
+        assert trade["TransactionID"] == "b1-1"
+        assert trade["Currency"] == ""
+        assert trade["Conversion rate"] == ""
+
+    def test_fx_error_surfaces_as_tdpro_error(self, tmp_path):
+        """An FxError from the fx layer (empty ECB series) is re-raised as
+        TdproError."""
+        with (
+            patch(
+                "tradestation.fx.requests.get",
+                return_value=_fx_response("TIME_PERIOD,OBS_VALUE\n"),
+            ),
+            pytest.raises(TdproError, match="no rates"),
+        ):
+            self._convert_fx(tmp_path, [_order_row()])
+
+    def test_same_day_fill_served_by_earlier_rate_warns_provisional(
+        self, tmp_path, caplog, monkeypatch
+    ):
+        """A weekday fill needing TODAY's rate but served by yesterday's
+        warns (hedged — names the currency, notes the day may not be an
+        ECB publication day)."""
+        _freeze_now(monkeypatch, _berlin(2026, 7, 15, 10))  # Wednesday 10:00
+        assert date(2026, 7, 15).weekday() < 5
+        csv_text = _ecb_csv({date(2026, 7, 14): "1.10"})
+        rows = [_order_row(datetime="2026-07-15T10:00:00")]
+        with (
+            caplog.at_level(logging.WARNING, logger="tradestation.tdpro"),
+            patch(
+                "tradestation.fx.requests.get",
+                return_value=_fx_response(csv_text),
+            ),
+        ):
+            out = self._convert_fx(
+                tmp_path, rows, fx_date_mode="utc"
+            )
+        _, data = _read_output(out)
+        trade = dict(zip(TDPRO_COLUMNS, data[0], strict=True))
+        assert trade["Conversion rate"] == _expected_rate_cell("1.10")
+        warnings = [
+            r.message for r in caplog.records
+            if "no ECB rate for" in r.message
+        ]
+        assert len(warnings) == 1
+        assert warnings[0].startswith("USD:")
+        assert "2026-07-15" in warnings[0]
+        assert "2026-07-14" in warnings[0]
+        assert "if 2026-07-15 is an ECB publication day" in warnings[0]
+        assert "16:00 CET" in warnings[0]
+
+    def test_needed_saturday_at_or_after_today_does_not_warn(
+        self, tmp_path, caplog, monkeypatch
+    ):
+        """F2: a Saturday needed date ≥ today is served the last published
+        rate with NO warning — the ECB never publishes on weekends, so the
+        served rate IS final."""
+        _freeze_now(monkeypatch, _berlin(2026, 7, 18, 10))  # Saturday 10:00
+        saturday = date(2026, 7, 18)
+        assert saturday.weekday() == 5
+        csv_text = _ecb_csv({date(2026, 7, 17): "1.10"})  # Friday
+        rows = [_order_row(datetime="2026-07-18T10:00:00")]
+        with (
+            caplog.at_level(logging.WARNING, logger="tradestation.tdpro"),
+            patch(
+                "tradestation.fx.requests.get",
+                return_value=_fx_response(csv_text),
+            ),
+        ):
+            out = self._convert_fx(
+                tmp_path, rows, fx_date_mode="utc"
+            )
+        _, data = _read_output(out)
+        trade = dict(zip(TDPRO_COLUMNS, data[0], strict=True))
+        assert trade["Conversion rate"] == _expected_rate_cell("1.10")
+        assert not any(
+            "no ECB rate for" in r.message for r in caplog.records
+        )
+
+    @pytest.mark.parametrize("closed_day, served_day", [
+        (date(2026, 1, 1), date(2025, 12, 31)),   # New Year's Day
+        (date(2026, 4, 3), date(2026, 4, 2)),     # Good Friday
+        (date(2026, 4, 6), date(2026, 4, 2)),     # Easter Monday
+        (date(2026, 5, 1), date(2026, 4, 30)),    # Labour Day
+        (date(2026, 12, 25), date(2026, 12, 24)), # Christmas Day
+        (date(2026, 12, 26), date(2026, 12, 24)), # Boxing Day (Saturday)
+    ])
+    def test_target_closing_day_at_or_after_today_does_not_warn(
+        self, tmp_path, caplog, monkeypatch, closed_day, served_day
+    ):
+        """F2: a needed date on a TARGET closing day >= today can never
+        have an ECB publication — the last published rate is final, so it
+        is served with NO provisional warning."""
+        _freeze_now(
+            monkeypatch,
+            _berlin(closed_day.year, closed_day.month, closed_day.day, 10),
+        )
+        csv_text = _ecb_csv({served_day: "1.10"})
+        rows = [_order_row(datetime=f"{closed_day.isoformat()}T10:00:00")]
+        with (
+            caplog.at_level(logging.WARNING, logger="tradestation.tdpro"),
+            patch(
+                "tradestation.fx.requests.get",
+                return_value=_fx_response(csv_text),
+            ),
+        ):
+            out = self._convert_fx(tmp_path, rows, fx_date_mode="utc")
+        _, data = _read_output(out)
+        trade = dict(zip(TDPRO_COLUMNS, data[0], strict=True))
+        assert trade["Conversion rate"] == _expected_rate_cell("1.10")
+        assert not any(
+            "no ECB rate for" in r.message for r in caplog.records
+        )
+
+    def test_past_weekday_holiday_stays_silent(
+        self, tmp_path, caplog, monkeypatch
+    ):
+        """F2 edge: a needed date that is a weekday TARGET holiday in the
+        PAST (d < today) never warns — the gate only fires at all for
+        d >= today."""
+        _freeze_now(monkeypatch, _berlin(2026, 7, 15, 10))
+        may_day = date(2026, 5, 1)  # Friday, TARGET-closed, in the past
+        assert may_day.weekday() == 4
+        csv_text = _ecb_csv({date(2026, 4, 30): "1.10"})
+        rows = [_order_row(datetime="2026-05-01T10:00:00")]
+        with (
+            caplog.at_level(logging.WARNING, logger="tradestation.tdpro"),
+            patch(
+                "tradestation.fx.requests.get",
+                return_value=_fx_response(csv_text),
+            ),
+        ):
+            out = self._convert_fx(tmp_path, rows, fx_date_mode="utc")
+        _, data = _read_output(out)
+        trade = dict(zip(TDPRO_COLUMNS, data[0], strict=True))
+        assert trade["Conversion rate"] == _expected_rate_cell("1.10")
+        assert not any(
+            "no ECB rate for" in r.message for r in caplog.records
+        )
+
+    def test_cross_rate_provisional_warns_per_currency(
+        self, tmp_path, caplog, monkeypatch
+    ):
+        """F3: --fx GBP with USD rows — the provisional warning names each
+        currency leg (dedup key includes currency), so the user knows both
+        the USD and GBP series are provisional."""
+        _freeze_now(monkeypatch, _berlin(2026, 7, 15, 10))  # Wednesday 10:00
+        csv_text = _ecb_csv({date(2026, 7, 14): "1.10"})
+        rows = [_order_row(Currency="USD", datetime="2026-07-15T10:00:00")]
+        with (
+            caplog.at_level(logging.WARNING, logger="tradestation.tdpro"),
+            patch(
+                "tradestation.fx.requests.get",
+                return_value=_fx_response(csv_text),
+            ),
+        ):
+            out = self._convert_fx(
+                tmp_path, rows, fx_base="GBP", fx_date_mode="utc"
+            )
+        _, data = _read_output(out)
+        assert len(data) == 1
+        warnings = [
+            r.message for r in caplog.records
+            if "no ECB rate for" in r.message
+        ]
+        # one warning per series leg: USD (row currency) AND GBP (base)
+        assert any(w.startswith("USD:") for w in warnings)
+        assert any(w.startswith("GBP:") for w in warnings)
+
+    def test_past_saturday_served_by_friday_does_not_warn(
+        self, tmp_path, caplog
+    ):
+        """A past weekend fallback is final — no provisional warning."""
+        saturday = date(2026, 1, 10)
+        assert saturday.weekday() == 5
+        csv_text = _ecb_csv({date(2026, 1, 9): "1.10"})  # Friday
+        rows = [_order_row(datetime="2026-01-10T10:00:00")]
+        with (
+            caplog.at_level(logging.WARNING, logger="tradestation.tdpro"),
+            patch(
+                "tradestation.fx.requests.get",
+                return_value=_fx_response(csv_text),
+            ),
+        ):
+            out = self._convert_fx(
+                tmp_path, rows, fx_date_mode="utc"
+            )
+        _, data = _read_output(out)
+        trade = dict(zip(TDPRO_COLUMNS, data[0], strict=True))
+        assert trade["Conversion rate"] == _expected_rate_cell("1.10")
+        assert not any(
+            "no ECB rate for" in r.message for r in caplog.records
+        )
+
+
+class TestCliFx:
+    """Tests for the --fx / --fx-date CLI plumbing."""
+
+    def test_fx_flag_normalizes_to_uppercase(self):
+        """--fx eur parses to 'EUR'."""
+        args = create_tdpro_parser().parse_args(["f.csv", "--fx", "eur"])
+        assert args.fx == "EUR"
+
+    @pytest.mark.parametrize("bad", ["1X", "EURO"])
+    def test_fx_flag_rejects_non_three_letter_codes(self, bad):
+        """--fx 1X and --fx EURO are rejected by argparse with exit code 2."""
+        with pytest.raises(SystemExit) as exc_info:
+            create_tdpro_parser().parse_args(["f.csv", "--fx", bad])
+        assert exc_info.value.code == 2
+
+    def test_fx_date_without_fx_exits_2(self, tmp_path):
+        """--fx-date without --fx is a usage error (exit 2)."""
+        with (
+            patch.object(
+                sys, "argv",
+                ["orders-to-tdpro", str(tmp_path / "x.csv"),
+                 "--fx-date", "utc"],
+            ),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            main_tdpro()
+        assert exc_info.value.code == 2
+
+    def test_fx_and_fx_date_flow_to_convert_orders_csv(self, tmp_path):
+        """--fx EUR --fx-date berlin reaches convert_orders_csv as
+        fx_base/fx_date_mode kwargs."""
+        input_path = str(tmp_path / "orders.csv")
+        with (
+            patch.object(
+                sys, "argv",
+                ["orders-to-tdpro", input_path, "--fx", "EUR",
+                 "--fx-date", "berlin"],
+            ),
+            patch(
+                "tradestation.tdpro.convert_orders_csv", return_value=(0, 0)
+            ) as m_convert,
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            main_tdpro()
+        assert exc_info.value.code == 0
+        assert m_convert.call_args.kwargs["fx_base"] == "EUR"
+        assert m_convert.call_args.kwargs["fx_date_mode"] == "berlin"
+
+    def test_help_shows_fx_flags(self, capsys):
+        """--help mentions both --fx and --fx-date."""
+        with pytest.raises(SystemExit) as exc_info:
+            create_tdpro_parser().parse_args(["--help"])
+        assert exc_info.value.code == 0
+        out = capsys.readouterr().out
+        assert "--fx" in out
+        assert "--fx-date" in out

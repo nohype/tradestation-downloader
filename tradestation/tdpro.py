@@ -10,13 +10,15 @@ import csv
 import hashlib
 import json
 import logging
-from datetime import datetime
-from decimal import Decimal
+from datetime import date, datetime
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from . import fx
 from .models import base_symbol
 
 logger = logging.getLogger(__name__)
@@ -143,19 +145,80 @@ def _transaction_id(order_id: str, row: pd.Series, leg: dict,
     return f"ts-{digest}-{leg_index}"
 
 
+def _make_rate_lookup(
+    fx_base: str,
+    rates_by_currency: dict[str, dict],
+    fx_date_mode: str,
+    today: date,
+):
+    """Build the ``(currency, fill_datetime) -> rate | None`` lookup used for
+    the Conversion rate column. ``None`` means the cell stays empty
+    (currency == base). FX failures surface as ``TdproError`` prefixed with
+    the row's currency.
+
+    When the needed date is today (or later) but only an earlier rate was
+    published, a WARNING is logged once per distinct
+    (currency, needed_date, served_date) triple — the same-day rate may
+    appear after the ECB's ~16:00 CET publication. The warning is
+    suppressed on dates where an ECB publication is impossible —
+    weekends and TARGET closing days (see
+    ``fx.ecb_publication_possible``) — because the served rate IS final
+    then. Past-date fallbacks (weekends, holidays) are final and never
+    warn.
+
+    This pairs with ``fx.ensure_rates``' provisional rule: uncovered
+    needed dates with a cached rate <= d are provisional and served by
+    the last-published fallback — this warning is their user-facing
+    signal — while uncovered dates with NO rate <= d are already
+    ``FxError``s upstream and never reach this lookup.
+    """
+    warned: set[tuple[str, date, date]] = set()
+
+    def rate_lookup(currency: str, dt: datetime) -> Decimal | None:
+        if currency == fx_base:
+            return None
+        try:
+            d = fx.fx_date(dt, fx_date_mode)
+            if d >= today and fx.ecb_publication_possible(d):
+                for ccy in ({currency, fx_base} - {"EUR"}):
+                    served = fx.last_published_on(rates_by_currency[ccy], d)
+                    if served < d and (ccy, d, served) not in warned:
+                        warned.add((ccy, d, served))
+                        logger.warning(
+                            "%s: no ECB rate for %s yet — used last "
+                            "published rate (%s); if %s is an ECB "
+                            "publication day, re-run after ~16:00 CET for "
+                            "the same-day rate",
+                            ccy, d, served, d,
+                        )
+            return fx.rate_to_base(
+                rates_by_currency, currency, fx_base, d,
+            )
+        except fx.FxError as e:
+            raise TdproError(f"{currency}: {e}") from e
+
+    return rate_lookup
+
+
 def _order_rows(
     row: pd.Series,
     legs: list,
     multipliers: dict[str, Decimal],
+    rate_lookup: Any = None,
 ) -> tuple[list[list[str]], str, int]:
     """Map one order's executed legs to TD Pro rows.
 
     Precondition: ``multipliers`` must contain every executed leg's
     underlying root — enforced by the pre-scan in ``convert_orders_csv``.
 
+    ``rate_lookup`` (when the ``--fx`` feature is on) maps
+    ``(currency, fill_datetime)`` to the ECB-derived conversion rate, or
+    ``None`` when the cell should stay empty (currency == base).
+
     Returns ``(rows, status, bad_legs)`` where status is ``"ok"``,
-    ``"non_executed"``, or ``"bad"``. Raises nothing — problem legs/orders are
-    logged, skipped, and reflected in the status/leg count.
+    ``"non_executed"``, or ``"bad"``. Problem legs/orders are logged, skipped,
+    and reflected in the status/leg count; only ``TdproError`` (an
+    unresolvable FX rate) propagates.
     """
     order_id = str(row["OrderID"]).strip()
 
@@ -197,6 +260,10 @@ def _order_rows(
             order_id, row["datetime"],
         )
         return [], "bad", skipped
+
+    currency = str(row["Currency"]).strip()
+    # trade_dt guarantees this parses — same source for the DateTime column
+    dt_obj = datetime.fromisoformat(str(row["datetime"]))
 
     # _is_executed_leg already guarantees these parse to positive ints
     total_qty = sum(_parse_exec_quantity(leg["ExecQuantity"]) for _, leg in executed)
@@ -247,6 +314,13 @@ def _order_rows(
             )
             commission = ""
         multiplier = multipliers[_underlying_root(leg)]
+        conversion = ""
+        if rate_lookup is not None and currency:
+            rate = rate_lookup(currency, dt_obj)
+            if rate is not None:
+                conversion = _decimal_str(
+                    rate.quantize(Decimal("0.00000001"), rounding=ROUND_HALF_UP)
+                )
         rows.append([
             _transaction_id(order_id, row, leg, leg_index),
             trade_dt,
@@ -257,8 +331,8 @@ def _order_rows(
             commission,
             "Futures",
             _decimal_str(multiplier),
-            str(row["Currency"]),
-            "",  # Conversion rate — left empty; TD Pro applies its own FX rate
+            currency,
+            conversion,  # ECB rate when --fx is on; else TD Pro's own FX rate applies
             _format_expiration(leg.get("ExpirationDate")),
             "",  # Call or Put — unused for Futures
             "",  # Strike — unused for Futures
@@ -273,6 +347,8 @@ def convert_orders_csv(
     input_path: Path,
     output_path: Path,
     multipliers: dict[str, Decimal | str | int],
+    fx_base: str | None = None,
+    fx_date_mode: str = "berlin",
 ) -> tuple[int, int]:
     """Convert an orders CSV to a TradingDiary Pro import CSV.
 
@@ -280,13 +356,21 @@ def convert_orders_csv(
         input_path: Orders CSV produced by ``tradestation-download orders``
         output_path: Destination CSV path (written atomically)
         multipliers: Extra/override contract point values keyed by root
+        fx_base: When set, fill ``Conversion rate`` with ECB daily reference
+            rates converting each row's currency to this base (e.g. ``EUR``)
+        fx_date_mode: ``"berlin"`` (German-local fill date) or ``"utc"`` —
+            the calendar date used for the ECB rate lookup
 
     Returns:
         ``(trades, orders)`` — trade rows written and total order rows processed
 
     Raises:
-        TdproError: Input missing/unreadable, required columns absent, or an
-            executed leg's underlying root has no known multiplier
+        TdproError: Input missing/unreadable, required columns absent, an
+            executed leg's underlying root has no known multiplier, an
+            executed row has a blank Currency under ``fx_base``, or the fx
+            layer fails — any ``fx.FxError`` (fetch failure, unwritable
+            cache, no rate covering a needed date) is re-raised as
+            ``TdproError`` naming the currency
     """
     input_path = Path(input_path)
     output_path = Path(output_path)
@@ -315,6 +399,8 @@ def convert_orders_csv(
     # Fail fast: every executed leg's underlying root must have a multiplier.
     missing_roots: set[str] = set()
     parsed_legs: list[list[dict] | None] = []
+    fx_needed: dict[str, set] = {}  # currency -> needed rate dates (--fx only)
+    blank_currency_orders: list[str] = []  # executed rows w/ blank Currency (--fx only)
     for _, row in df.iterrows():
         try:
             legs = json.loads(row["Legs"])
@@ -325,16 +411,69 @@ def convert_orders_csv(
             parsed_legs.append(None)
             continue
         parsed_legs.append(legs)
+        executed_any = False
         for leg in legs:
             if _is_executed_leg(leg):
+                executed_any = True
                 root = _underlying_root(leg)
                 if root not in effective:
                     missing_roots.add(root)
+        if fx_base is not None and executed_any:
+            currency = str(row["Currency"]).strip()
+            if not currency:
+                # Fail loud: a blank currency under --fx would otherwise emit
+                # an empty Conversion rate cell and silently resurrect the
+                # stale-rate bug the column exists to fix.
+                order_id = str(row["OrderID"]).strip()
+                blank_currency_orders.append(
+                    order_id or f"order at {row['datetime']}"
+                )
+                continue
+            try:
+                dt = datetime.fromisoformat(str(row["datetime"]))
+            except ValueError:
+                dt = None  # row warns+skips in the real pass
+            if currency != fx_base and dt is not None:
+                fx_needed.setdefault(currency, set()).add(
+                    fx.fx_date(dt, fx_date_mode)
+                )
     if missing_roots:
         roots = ", ".join(sorted(missing_roots))
         raise TdproError(
             f"No multiplier known for underlying root(s): {roots}. "
             "Add them with -m ROOT=VALUE (e.g. -m ES=50)."
+        )
+    if blank_currency_orders:
+        raise TdproError(
+            "Blank Currency on executed order(s) under --fx: "
+            f"{', '.join(blank_currency_orders)}. Fix the orders CSV or "
+            "rerun without --fx (TD Pro then applies its own FX rate)."
+        )
+
+    rate_lookup = None
+    if fx_base is not None:
+        # A non-EUR base needs its own series for rate_to_base; EUR is 1 by
+        # definition and ECB-quoted currencies only need their own series.
+        all_dates = set().union(*fx_needed.values()) if fx_needed else set()
+        if fx_base != "EUR" and all_dates:
+            fx_needed.setdefault(fx_base, set()).update(all_dates)
+        rates_by_currency = {}
+        # The ECB publication calendar is CET: "today" is the Europe/Berlin
+        # date — the fetch end for ensure_rates and the threshold for the
+        # provisional-rate warning gate.
+        today = datetime.now(ZoneInfo("Europe/Berlin")).date()
+        for currency in sorted(fx_needed):
+            if currency == "EUR":
+                continue
+            try:
+                # ensure_rates errors already name the currency
+                rates_by_currency[currency] = fx.ensure_rates(
+                    currency, fx_needed[currency], today=today
+                )
+            except fx.FxError as e:
+                raise TdproError(str(e)) from e
+        rate_lookup = _make_rate_lookup(
+            fx_base, rates_by_currency, fx_date_mode, today
         )
 
     trade_rows: list[list[str]] = []
@@ -346,7 +485,7 @@ def convert_orders_csv(
             )
             skipped_bad_rows += 1
             continue
-        rows, status, bad_legs = _order_rows(row, legs, effective)
+        rows, status, bad_legs = _order_rows(row, legs, effective, rate_lookup)
         if status == "non_executed":
             skipped_non_executed += 1
         elif status == "bad":

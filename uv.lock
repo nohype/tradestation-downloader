@@ -746,6 +746,7 @@ dependencies = [
     { name = "pyarrow" },
     { name = "pyyaml" },
     { name = "requests" },
+    { name = "tzdata" },
 ]
 
 [package.optional-dependencies]
@@ -768,6 +769,7 @@ requires-dist = [
     { name = "requests", specifier = ">=2.28.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
     { name = "twine", marker = "extra == 'dev'", specifier = ">=6.0.0" },
+    { name = "tzdata", specifier = ">=2024.1" },
 ]
 provides-extras = ["dev"]
 

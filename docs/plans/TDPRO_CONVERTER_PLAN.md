@@ -204,3 +204,121 @@ self-documenting — Lean UX).
 - Default `-o` naming; `-o` honored; atomic output.
 - Empty (header-only) input → header-only output, exit 0.
 - CLI: parser shape, `main_tdpro` dispatch, `--help` text.
+
+---
+
+## 5. FX conversion rates (`--fx`) — German-tax-correct EUR reporting
+
+Motivation: TD Pro converts each leg at its own per-date USD→EUR rate (the
+legally correct per-leg model) but its internal rate table delivered stale
+values (a 2026-07-06 leg used February's rate → phantom P&L). The
+`Conversion rate` column exists precisely to override that data with
+authoritative rates.
+
+### Legal/technical basis (verified)
+
+- R 34c Abs. 1 EStR prescribes the **ECB daily euro reference rate**
+  (Euro-Referenzkurs); § 20 Abs. 4 Satz 1 EStG + BFH Stichtagsprinzip require
+  **per-leg** conversion (proceeds at close-date rate, cost at open-date rate).
+  Hessisches FG 7 K 854/20 (2023): internet-platform rates are inadmissible.
+- Weekend/holiday: **last previously published rate** (documented convention).
+- Source: `GET https://data-api.ecb.europa.eu/service/data/EXR/D.{CUR}.EUR.SP00.A?startPeriod=…&endPeriod=…&format=csvdata&detail=dataonly`
+  — free, no auth, since 1999, verified live. Published `1 EUR = X {CUR}`.
+- TD Pro column = multiplier transaction→base → for `--fx EUR` emit
+  `1 / ecb(CUR)`; general rule `rate(cur→base) = ecb(base) / ecb(cur)`.
+  Emit rounded to 8 decimals (ROUND_HALF_UP).
+- ECB publishes ~16:00 CET on TARGET working days; same-day rate before
+  publication → last-published fallback (covers today/weekends/future dates).
+- **Evidence-based windows**: a recorded window ends at the newest
+  publication the ECB actually returned — never the requested end. A
+  pre-publication or delayed-publication fetch therefore records a
+  shorter window, and a needed date beyond the last proven publication
+  stays uncovered → one refetch per run until the publication lands
+  (self-healing). A still-uncovered needed date `d` after the fetch is
+  **provisional** iff any cached rate `r <= d` exists (uncovered-with-a-
+  prior-rate always means "beyond proven evidence" — weekend, holiday,
+  or not-yet-published) and is served by `rate_on`'s last-published
+  fallback (+ warning in tdpro); a `d` with NO rate `<= d` at all is a
+  **real hole** → `FxError`. By construction a window can never claim a
+  day whose publication did not exist at fetch time.
+
+### Design
+
+- New small module `tradestation/fx.py`: `FxError`, `rate_to_base()`, ECB
+  fetch + cache. Cache: `orders/fx_cache/<CCY>.json` (v3)
+  `{"version": 3, "rates": {"YYYY-MM-DD": "1.1253"}, "windows": [["YYYY-MM-DD","YYYY-MM-DD"], ...]}`
+  — human-inspectable audit trail. Windows are `[fetch_start,
+  max(fetched_dates)]` — the range the fetch PROVES covered (sorted,
+  non-overlapping; overlapping/adjacent ≤1d-gap ranges merged on save);
+  every publication inside a recorded window is guaranteed cached. The
+  recorded window SPLITS at every >14d hole between consecutive cached
+  rates — longer than any true publication gap (~5d Easter cluster), so
+  it marks missing data that must not be claimed; the hole stays
+  uncovered and self-heals on refetch. Files without `version` are
+  legacy and load under the same rules; legacy files without `windows`
+  load with `windows=[]` — rates kept, refetch fills coverage in.
+  (JSON over parquet decided; path lives outside `orders/cache/<account>`
+  so `orders --full` cannot wipe it.)
+- Coverage semantics (window-based, per needed date): a needed date `d` is
+  covered iff some recorded window `[s, e]` satisfies `e >= d` — proving
+  every publication through `d` is known — AND some cached rate `r`
+  satisfies `s <= r <= d` (the max such `r` is then provably the true
+  last-published <= `d`). If no rate lies in `[s, d]`, the true
+  last-published precedes `s` and coverage cannot be proven → uncovered.
+  This subsumes the old trailing-freshness check (deleted). Any uncovered
+  needed date issues ONE fetch over `[min(needed) - 14d, today]` (end
+  clamped up to the start for future dates), fetched values win on merge,
+  the range `[start, max(fetched_dates)]` is recorded as a window;
+  still-uncovered needed dates with no cached rate <= `d` after the
+  fetch → `FxError` naming currency + dates; dates with a prior rate
+  stay provisional.
+- Cache integrity: on load every rate value must parse as a finite
+  `Decimal > 0`, every key/window bound as an ISO date, every window a
+  2-element pair — ANY violation discards the whole cache as corrupt
+  (warning + refetch). Overclaimed/corrupt WINDOWS are softer: a window
+  whose end is not a published rate date or that spans a >14d interior
+  rate hole is dropped individually (info-log, rates kept) — one refetch
+  heals it. Writes go through a unique `tempfile.mkstemp` file +
+  `os.replace`.
+- Provisional same-day rate: when the served rate's date < needed date and
+  the needed date >= today, log a WARNING once per distinct
+  (currency, needed, served) triple — the currency is named so cross-rate
+  runs (`--fx GBP` etc.) warn per series leg. Suppressed on weekends and
+  TARGET closing days (Jan 1, Good Friday, Easter Monday, May 1,
+  Dec 25, Dec 26 — the ECB never publishes then, so the served rate IS
+  final). The message hedges publication-day certainty: "if {d} is an
+  ECB publication day, re-run after ~16:00 CET for the same-day rate".
+  Past-date fallbacks never warn.
+- HTTP 404 → `FxError` naming the currency as not an ECB-quoted daily
+  reference currency (check the code; the ECB covers ~30 currencies).
+- CLI: `--fx BASE` (3-letter code, upper-normalized) enables the column;
+  `--fx-date {berlin|utc}` (default `berlin`, PM/user ruling) picks the
+  calendar date used for the rate lookup — Berlin = taxpayer-local date;
+  `--fx-date` without `--fx` → argparse error.
+- Rate date = the fill's `datetime` (naive UTC) converted to Europe/Berlin
+  (or taken as-is for `utc`); `zoneinfo.ZoneInfo` (needs `tzdata` package —
+  declare it; present transitively via pandas on Windows but now a direct
+  dependency).
+- Rows where Currency == base → empty cell. Blank/whitespace Currency on an
+  executed row under `--fx` → `TdproError` naming the affected OrderIDs
+  (silent empty cell would resurrect the stale-rate bug). Missing/
+  uncoverable rate → `TdproError` naming dates/currencies (never silently
+  guess).
+- ECB outage/unreachable + uncached needed dates → fail loudly.
+- Precision: `Decimal` throughout; ECB values have 4 dp.
+
+### Rulings
+
+- Per-leg dates come from each order's `datetime` (identical to the emitted
+  DateTime — self-consistent).
+- Opt-in `--fx`: base currency is user state we cannot know; explicit flag
+  removes the assumption.
+- `tzdata>=2024.1` added to dependencies (zoneinfo on Windows).
+
+### FX test plan
+
+- ECB CSV parsing; weekend→Friday fallback; same-currency→empty cell;
+  orientation (`--fx EUR` → emitted rate = 1/published); cache hit skips
+  fetch; missing-range triggers one fetch; missing rate → error naming date;
+  berlin-vs-utc boundary fill (22:30 UTC → different dates); `--fx-date`
+  without `--fx` → exit 2; mock `requests.get` throughout.

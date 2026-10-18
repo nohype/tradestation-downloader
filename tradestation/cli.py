@@ -331,6 +331,16 @@ def _multiplier_type(value: str) -> tuple[str, str]:
     return root, num.strip()
 
 
+def _fx_type(value: str) -> str:
+    """Argparse type for --fx BASE; returns the normalized 3-letter currency code."""
+    code = value.strip().upper()
+    if not re.fullmatch(r"[A-Z]{3}", code):
+        raise argparse.ArgumentTypeError(
+            f"base currency must be a 3-letter code like EUR, got {value!r}"
+        )
+    return code
+
+
 def create_tdpro_parser() -> argparse.ArgumentParser:
     """Create argument parser for the orders-to-tdpro converter."""
     parser = argparse.ArgumentParser(
@@ -345,6 +355,7 @@ Examples:
   %(prog)s orders.csv -o out.csv  Custom output path
   %(prog)s orders.csv -m ES=50 -m MGC=10
                                   Add/override contract multipliers
+  %(prog)s orders.csv --fx EUR    Fill Conversion rate with ECB daily rates
 """,
     )
 
@@ -366,6 +377,22 @@ Examples:
         default=[],
         metavar="ROOT=VALUE",
         help="Add or override a contract point value; repeatable",
+    )
+    parser.add_argument(
+        "--fx",
+        type=_fx_type,
+        default=None,
+        metavar="BASE",
+        help="Fill Conversion rate with ECB daily reference rates to BASE "
+             "(e.g. EUR)",
+    )
+    parser.add_argument(
+        "--fx-date",
+        choices=["berlin", "utc"],
+        default=None,
+        help="Calendar date for the ECB rate lookup (requires --fx): "
+             "'berlin' = German-local date of the fill, the tax-relevant one "
+             "(default); 'utc' = the recorded date",
     )
     parser.add_argument(
         "-v", "--verbose",
@@ -604,7 +631,10 @@ def run_tdpro_mode(args: argparse.Namespace) -> int:
     multipliers = dict(args.multiplier)
 
     try:
-        n_trades, n_orders = convert_orders_csv(input_path, output_path, multipliers)
+        n_trades, n_orders = convert_orders_csv(
+            input_path, output_path, multipliers,
+            fx_base=args.fx, fx_date_mode=args.fx_date or "berlin",
+        )
     except TdproError as e:
         logger.error(str(e))
         return 1
@@ -625,6 +655,9 @@ def main_tdpro() -> None:
     """Entry point for the orders-to-tdpro converter CLI."""
     parser = create_tdpro_parser()
     args = parser.parse_args()
+
+    if args.fx_date is not None and args.fx is None:
+        parser.error("--fx-date requires --fx")
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
