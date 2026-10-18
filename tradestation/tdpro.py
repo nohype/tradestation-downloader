@@ -298,11 +298,27 @@ def _order_rows(
             )
             skipped += 1
             continue
+        # TD Pro uses the Commission column as BASE currency — it never
+        # applies the Conversion rate to it — so under --fx the fee must
+        # be emitted already converted, else the report silently charges
+        # a USD fee as if it were EUR.
+        rate_q = None
+        if rate_lookup is not None and currency:
+            rate = rate_lookup(currency, dt_obj)
+            if rate is not None:
+                rate_q = rate.quantize(
+                    Decimal("0.00000001"), rounding=ROUND_HALF_UP
+                )
         try:
-            commission = (
-                "" if fee is None
-                else _decimal_str(fee * Decimal(qty) / Decimal(total_qty))
-            )
+            if fee is None:
+                commission = ""
+            else:
+                share = fee * Decimal(qty) / Decimal(total_qty)
+                if rate_q is not None:
+                    share = (share * rate_q).quantize(
+                        Decimal("0.00000001"), rounding=ROUND_HALF_UP
+                    )
+                commission = _decimal_str(share)
         except ArithmeticError:
             # Backstop: extreme values (e.g. a pathological ExecQuantity)
             # can overflow the decimal context during the split — leave the
@@ -314,13 +330,7 @@ def _order_rows(
             )
             commission = ""
         multiplier = multipliers[_underlying_root(leg)]
-        conversion = ""
-        if rate_lookup is not None and currency:
-            rate = rate_lookup(currency, dt_obj)
-            if rate is not None:
-                conversion = _decimal_str(
-                    rate.quantize(Decimal("0.00000001"), rounding=ROUND_HALF_UP)
-                )
+        conversion = "" if rate_q is None else _decimal_str(rate_q)
         rows.append([
             _transaction_id(order_id, row, leg, leg_index),
             trade_dt,

@@ -1675,6 +1675,34 @@ class TestConvertFx:
         trade = dict(zip(TDPRO_COLUMNS, data[0], strict=True))
         assert trade["Conversion rate"] == _expected_rate_cell("1.1419")
 
+    def test_commission_is_emitted_converted_to_base_under_fx(
+        self, tmp_path
+    ):
+        """TD Pro treats Commission as base currency (it never applies
+        the Conversion rate to it), so under --fx the USD fee must be
+        emitted already converted: cell = share x emitted rate."""
+        csv_text = _ecb_csv({date(2026, 2, 6): "1.2500"})
+        rows = [_order_row(CommissionFee="0.5")]
+        with patch(
+            "tradestation.fx.requests.get",
+            return_value=_fx_response(csv_text),
+        ):
+            out = self._convert_fx(tmp_path, rows)
+        _, data = _read_output(out)
+        trade = dict(zip(TDPRO_COLUMNS, data[0], strict=True))
+        assert trade["Conversion rate"] == "0.80000000"
+        assert trade["Commission"] == "0.40000000"  # 0.5 USD x 0.8, not raw 0.5
+
+    def test_commission_stays_raw_when_currency_is_base(self, tmp_path):
+        """A base-currency row needs no conversion: fee unchanged."""
+        rows = [_order_row(Currency="EUR", CommissionFee="0.5")]
+        with patch("tradestation.fx.requests.get"):
+            out = self._convert_fx(tmp_path, rows)
+        _, data = _read_output(out)
+        trade = dict(zip(TDPRO_COLUMNS, data[0], strict=True))
+        assert trade["Conversion rate"] == ""
+        assert trade["Commission"] == "0.5"
+
     def test_row_with_currency_equal_to_fx_base_gets_empty_cell(
         self, tmp_path
     ):

@@ -277,6 +277,8 @@ uv run orders-to-tdpro orders/orders.csv --fx EUR
 
 Rates cache to `orders/fx_cache/<CCY>.json` — human-inspectable files recording both the published rates and the fetched date windows that prove coverage. A currency is only re-fetched when its cached windows cannot cover the needed dates; deleting a currency's file forces a clean re-fetch.
 
+Note on `Commission`: TD Pro treats that column as **base currency** — it never applies `Conversion rate` to it. Under `--fx` the converter therefore writes each fill's fee already converted (USD fee × leg rate), so cost basis and proceeds come out tax-correct; without `--fx` the column carries the order's currency, which is only correct when TD Pro's base currency matches it.
+
 `-m` values are not persisted — repeat the flag on each run that needs them.
 
 ## Loading Data

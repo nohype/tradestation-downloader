@@ -306,6 +306,12 @@ authoritative rates.
   guess).
 - ECB outage/unreachable + uncached needed dates → fail loudly.
 - Precision: `Decimal` throughout; ECB values have 4 dp.
+- Verified against a live TD Pro report (2026-10): the `Commission`
+  column is treated as **base currency** — TD Pro never applies the
+  Conversion rate to it. Under `--fx` the per-leg fee is therefore
+  emitted already converted (`share × leg rate`, 8dp), so cost basis
+  and proceeds come out tax-correct; a raw USD fee would be silently
+  charged as if it were EUR.
 
 ### Rulings
 
